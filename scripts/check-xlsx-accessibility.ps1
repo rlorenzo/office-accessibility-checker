@@ -11,14 +11,16 @@
     Rule coverage:
       ERROR:   MissingAltText, MissingTableHeaders, DocumentProtected,
                RedOnlyNegativeFormatting
-      WARNING: MergedCells, DefaultSheetTabName
-      TIP:     DefaultTableName, ContrastSkipped (detailed mode only)
+      WARNING: MergedCells, DefaultSheetTabName, LowContrast
+      TIP:     DefaultTableName
 
-    Note: RedOnlyNegativeFormatting detection is best-effort. The check
-    inspects custom numFmt format codes for a "[Red]" color marker that
-    lacks a complementary differentiator (parentheses, leading minus, or
-    another color in the negative section). Edge cases in highly custom
-    format strings may produce false negatives.
+    Notes:
+      - RedOnlyNegativeFormatting: best-effort detection of "[Red]" numFmt
+        codes that lack a complementary minus/parens/secondary color.
+      - LowContrast: best-effort. Only flags cells whose font color and
+        cell fill are both explicit RGB values; theme references, indexed
+        palette colors, "auto", non-solid fills, and conditional formatting
+        are skipped.
 
 .PARAMETER FilePath
     Path to a .xlsx or .xlsm file.
@@ -175,12 +177,6 @@ function Get-ChildElement {
     }
     if ($null -eq $Parent) { return $null }
     return $Parent.Element([System.Xml.Linq.XName]::Get($LocalName, $Namespace))
-}
-
-function Get-Descendant {
-    param([System.Xml.Linq.XContainer] $Root, [string] $Namespace, [string] $LocalName)
-    if ($null -eq $Root) { return @() }
-    return ,@($Root.Descendants([System.Xml.Linq.XName]::Get($LocalName, $Namespace)))
 }
 
 #--------------------------------------------------------------------
@@ -469,6 +465,155 @@ function Test-RedOnlyNumberFormat {
 }
 
 #--------------------------------------------------------------------
+# Rule: LowContrast (WARNING) -- best-effort
+#--------------------------------------------------------------------
+#
+# Walks every text-bearing cell on every worksheet, resolves its effective
+# font color and fill color via the cellXf -> font/fill chain in styles.xml,
+# and flags pairs whose WCAG 2.x contrast ratio falls below 4.5:1.
+#
+# Skipped (cannot be evaluated without rendering): "auto" colors, theme
+# references, indexed-palette references, gradient/non-solid fills, and any
+# cell whose font or fill resolves to a non-explicit value. Conditional
+# formatting rules are also out of scope (they depend on cell values).
+#
+# Note: font-size-driven large-text relaxation (3.0:1 vs 4.5:1) is omitted
+# because Excel cells inherit font size in ways the static check cannot
+# resolve reliably; we use the stricter 4.5:1 universally.
+
+function Get-RelativeLuminance {
+    param([Parameter(Mandatory)] [string] $Hex)
+    $r = [Convert]::ToInt32($Hex.Substring(0, 2), 16) / 255.0
+    $g = [Convert]::ToInt32($Hex.Substring(2, 2), 16) / 255.0
+    $b = [Convert]::ToInt32($Hex.Substring(4, 2), 16) / 255.0
+    $rL = if ($r -le 0.03928) { $r / 12.92 } else { [Math]::Pow(($r + 0.055) / 1.055, 2.4) }
+    $gL = if ($g -le 0.03928) { $g / 12.92 } else { [Math]::Pow(($g + 0.055) / 1.055, 2.4) }
+    $bL = if ($b -le 0.03928) { $b / 12.92 } else { [Math]::Pow(($b + 0.055) / 1.055, 2.4) }
+    return 0.2126 * $rL + 0.7152 * $gL + 0.0722 * $bL
+}
+
+function Get-ContrastRatio {
+    param(
+        [Parameter(Mandatory)] [string] $ForegroundHex,
+        [Parameter(Mandatory)] [string] $BackgroundHex
+    )
+    $fgL = Get-RelativeLuminance -Hex $ForegroundHex
+    $bgL = Get-RelativeLuminance -Hex $BackgroundHex
+    $lighter = [Math]::Max($fgL, $bgL)
+    $darker  = [Math]::Min($fgL, $bgL)
+    return ($lighter + 0.05) / ($darker + 0.05)
+}
+
+# Excel <color> elements may carry rgb=, theme=, indexed=, or auto=. Only
+# explicit rgb values can be evaluated; everything else returns $null.
+# rgb is stored as 8-hex ARGB; we strip the alpha channel.
+function Get-ExcelExplicitColorHex {
+    param([System.Xml.Linq.XElement] $ColorEl)
+    if ($null -eq $ColorEl) { return $null }
+    if (-not [string]::IsNullOrEmpty((Get-XAttr -Element $ColorEl -Namespace $null -LocalName 'theme'))) { return $null }
+    if (-not [string]::IsNullOrEmpty((Get-XAttr -Element $ColorEl -Namespace $null -LocalName 'indexed'))) { return $null }
+    $auto = Get-XAttr -Element $ColorEl -Namespace $null -LocalName 'auto'
+    if ($auto -eq '1' -or $auto -eq 'true') { return $null }
+    $rgb = Get-XAttr -Element $ColorEl -Namespace $null -LocalName 'rgb'
+    if ([string]::IsNullOrEmpty($rgb)) { return $null }
+    if ($rgb -match '^[0-9A-Fa-f]{8}$') { return $rgb.Substring(2) }
+    if ($rgb -match '^[0-9A-Fa-f]{6}$') { return $rgb }
+    return $null
+}
+
+function Test-LowContrast {
+    param($WorkbookPart, $SheetMap)
+    $issues = @()
+    if ($null -eq $WorkbookPart -or $null -eq $WorkbookPart.WorkbookStylesPart) { return $issues }
+
+    $stylesDoc = Get-PartXDocument -Part $WorkbookPart.WorkbookStylesPart
+    if ($null -eq $stylesDoc -or $null -eq $stylesDoc.Root) { return $issues }
+
+    # fonts[i] -> hex (or $null if not explicit)
+    $fontColors = New-Object 'System.Collections.Generic.List[object]'
+    $fontsEl = Get-ChildElement -Parent $stylesDoc.Root -Namespace $NS.s -LocalName 'fonts'
+    if ($fontsEl) {
+        foreach ($font in (Get-ChildElement -Parent $fontsEl -Namespace $NS.s -LocalName 'font' -All)) {
+            $colorEl = Get-ChildElement -Parent $font -Namespace $NS.s -LocalName 'color'
+            $fontColors.Add((Get-ExcelExplicitColorHex $colorEl)) | Out-Null
+        }
+    }
+
+    # fills[i] -> hex (only solid patternFill with explicit fgColor); else $null
+    $fillColors = New-Object 'System.Collections.Generic.List[object]'
+    $fillsEl = Get-ChildElement -Parent $stylesDoc.Root -Namespace $NS.s -LocalName 'fills'
+    if ($fillsEl) {
+        foreach ($fill in (Get-ChildElement -Parent $fillsEl -Namespace $NS.s -LocalName 'fill' -All)) {
+            $hex = $null
+            $pf = Get-ChildElement -Parent $fill -Namespace $NS.s -LocalName 'patternFill'
+            if ($pf) {
+                $type = Get-XAttr -Element $pf -Namespace $null -LocalName 'patternType'
+                if ($type -eq 'solid') {
+                    $fgColorEl = Get-ChildElement -Parent $pf -Namespace $NS.s -LocalName 'fgColor'
+                    $hex = Get-ExcelExplicitColorHex $fgColorEl
+                }
+            }
+            $fillColors.Add($hex) | Out-Null
+        }
+    }
+
+    # cellXfs[i] -> (FontId, FillId)
+    $cellXfs = New-Object 'System.Collections.Generic.List[object]'
+    $cellXfsEl = Get-ChildElement -Parent $stylesDoc.Root -Namespace $NS.s -LocalName 'cellXfs'
+    if ($cellXfsEl) {
+        foreach ($xf in (Get-ChildElement -Parent $cellXfsEl -Namespace $NS.s -LocalName 'xf' -All)) {
+            $fontId = 0; [int]::TryParse((Get-XAttr -Element $xf -Namespace $null -LocalName 'fontId'), [ref] $fontId) | Out-Null
+            $fillId = 0; [int]::TryParse((Get-XAttr -Element $xf -Namespace $null -LocalName 'fillId'), [ref] $fillId) | Out-Null
+            $cellXfs.Add([pscustomobject]@{ FontId = $fontId; FillId = $fillId }) | Out-Null
+        }
+    }
+
+    if ($cellXfs.Count -eq 0) { return $issues }
+
+    $cName = [System.Xml.Linq.XName]::Get('c', $NS.s)
+    foreach ($wsPart in $WorkbookPart.WorksheetParts) {
+        $wsDoc = Get-PartXDocument -Part $wsPart
+        if ($null -eq $wsDoc -or $null -eq $wsDoc.Root) { continue }
+        $sheetName = Get-WorksheetDisplayName -WorkbookPart $WorkbookPart -WorksheetPart $wsPart -SheetMap $SheetMap
+
+        foreach ($cell in $wsDoc.Root.Descendants($cName)) {
+            $sAttr = $cell.Attribute([System.Xml.Linq.XName]::Get('s'))
+            if ($null -eq $sAttr) { continue }
+
+            # Skip cells with no displayable text. Empty cells render nothing,
+            # so contrast is meaningless and would produce noise on large sheets
+            # with widespread fill formatting.
+            $hasContent = $false
+            foreach ($child in $cell.Elements()) {
+                $ln = $child.Name.LocalName
+                if ($ln -eq 'v' -or $ln -eq 'f' -or $ln -eq 'is') { $hasContent = $true; break }
+            }
+            if (-not $hasContent) { continue }
+
+            $sIdx = -1
+            if (-not [int]::TryParse($sAttr.Value, [ref] $sIdx)) { continue }
+            if ($sIdx -lt 0 -or $sIdx -ge $cellXfs.Count) { continue }
+            $xf = $cellXfs[$sIdx]
+            if ($xf.FontId -lt 0 -or $xf.FontId -ge $fontColors.Count) { continue }
+            if ($xf.FillId -lt 0 -or $xf.FillId -ge $fillColors.Count) { continue }
+            $fg = $fontColors[$xf.FontId]
+            $bg = $fillColors[$xf.FillId]
+            if ([string]::IsNullOrEmpty($fg) -or [string]::IsNullOrEmpty($bg)) { continue }
+
+            $cellRef = Get-XAttr -Element $cell -Namespace $null -LocalName 'r'
+            if ([string]::IsNullOrEmpty($cellRef)) { $cellRef = '(unknown)' }
+            $ratio = Get-ContrastRatio -ForegroundHex $fg -BackgroundHex $bg
+            if ($ratio -lt 4.5) {
+                $issues += New-Issue -Severity 'WARNING' -RuleName 'LowContrast' `
+                    -Description ("Cell {0} on sheet `"{1}`" has contrast {2:N2}:1 (#{3} on #{4}); WCAG requires 4.5:1" -f $cellRef, $sheetName, $ratio, $fg.ToUpper(), $bg.ToUpper())
+            }
+        }
+    }
+
+    return $issues
+}
+
+#--------------------------------------------------------------------
 # Main: open document and run all rules
 #--------------------------------------------------------------------
 
@@ -518,6 +663,9 @@ try {
         foreach ($i in (Test-RedOnlyNumberFormat -WorkbookStylesPart $wbPart.WorkbookStylesPart -UsedNumFmtIds $usedNumFmtIds)) {
             $issues.Add($i) | Out-Null
         }
+        foreach ($i in (Test-LowContrast -WorkbookPart $wbPart -SheetMap $sheetMap)) {
+            $issues.Add($i) | Out-Null
+        }
 
         # Per-worksheet rules
         foreach ($wsPart in $wbPart.WorksheetParts) {
@@ -550,17 +698,19 @@ finally {
     }
 }
 
-# Always-on TIP: contrast skipped
-$issues.Add((New-Issue -Severity 'TIP' -RuleName 'ContrastSkipped' `
-    -Description 'Contrast check skipped (requires rendering)')) | Out-Null
-
 #--------------------------------------------------------------------
 # Output + exit
 #--------------------------------------------------------------------
 
-$errorCount = (@($issues | Where-Object { $_.Severity -eq 'ERROR' })).Count
+$errorIssues = @($issues | Where-Object { $_.Severity -eq 'ERROR' })
+$errorCount = $errorIssues.Count
 $exitCode = if ($errorCount -gt 0) { 1 } else { 0 }
-$summary = if ($errorCount -gt 0) { "FAIL $FilePath" } else { "PASS $FilePath" }
+if ($errorCount -gt 0) {
+    $errorRules = ($errorIssues | Select-Object -ExpandProperty RuleName -Unique) -join ', '
+    $summary = "FAIL $FilePath`: $errorRules"
+} else {
+    $summary = "PASS $FilePath"
+}
 
 if ($Format -eq 'detailed') {
     $severityRank = @{ 'ERROR' = 0; 'WARNING' = 1; 'TIP' = 2 }

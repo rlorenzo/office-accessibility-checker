@@ -8,8 +8,8 @@
     common accessibility issues (missing alt text, missing table headers,
     document protection, missing content control titles, merged cells,
     heading-order skips, floating objects, repeated blank characters, lack of
-    headings). Emits a single PASS/FAIL line in 'text' mode, or a sorted list
-    of issues followed by the PASS/FAIL line in 'detailed' mode.
+    headings, low contrast). Emits a single PASS/FAIL line in 'text' mode, or
+    a sorted list of issues followed by the PASS/FAIL line in 'detailed' mode.
 
 .PARAMETER FilePath
     Path to a .docx or .docm file.
@@ -248,6 +248,12 @@ function Test-GroupAltText {
 # value="1"). w:tblLook is table-style metadata that drives visual first-row
 # formatting; it does not expose header semantics to assistive technology, so
 # it must NOT satisfy this rule.
+#
+# Layout tables — tables used purely for visual arrangement (e.g. photo grids)
+# rather than tabular data — are exempt. A table with w:tblPr/w:tblDescription
+# is treated as declaring its purpose to assistive tech; forcing tblHeader on
+# the first row would mislabel arrangement cells as data headers, so we use
+# the presence of tblDescription as the OOXML signal of layout intent.
 function Test-TableHeader {
     param([Xml.Linq.XContainer] $Root, [int] $StartIndex, [ref] $Issues)
     if (-not $Root) { return $StartIndex }
@@ -258,6 +264,15 @@ function Test-TableHeader {
         $idx++
         $rows = $tbl.Elements([Xml.Linq.XName]::Get('tr', $NS.w))
         if (-not $rows -or $rows.Count -eq 0) { continue }
+
+        $tblPr = Get-ChildElement -Parent $tbl -Namespace $NS.w -LocalName 'tblPr'
+        if ($tblPr) {
+            $tblDescription = Get-ChildElement -Parent $tblPr -Namespace $NS.w -LocalName 'tblDescription'
+            if ($tblDescription) {
+                # Layout table — skip the header check.
+                continue
+            }
+        }
 
         $firstRow = $rows | Select-Object -First 1
         $hasHeader = $false
@@ -447,11 +462,107 @@ function Test-NoHeadingStyle {
     }
 }
 
-# --- Rule: ContrastSkipped (TIP) ---------------------------------------------
-function Test-ContrastSkipped {
-    param([ref] $Issues)
-    $Issues.Value += New-Issue -Severity TIP -RuleName 'ContrastSkipped' `
-        -Description 'Contrast check skipped (requires rendering)'
+# --- Contrast helpers --------------------------------------------------------
+# WCAG 2.x relative luminance and contrast ratio.
+# https://www.w3.org/TR/WCAG21/#dfn-relative-luminance
+function Get-RelativeLuminance {
+    param([Parameter(Mandatory)] [string] $Hex)
+    $r = [Convert]::ToInt32($Hex.Substring(0, 2), 16) / 255.0
+    $g = [Convert]::ToInt32($Hex.Substring(2, 2), 16) / 255.0
+    $b = [Convert]::ToInt32($Hex.Substring(4, 2), 16) / 255.0
+    $rL = if ($r -le 0.03928) { $r / 12.92 } else { [Math]::Pow(($r + 0.055) / 1.055, 2.4) }
+    $gL = if ($g -le 0.03928) { $g / 12.92 } else { [Math]::Pow(($g + 0.055) / 1.055, 2.4) }
+    $bL = if ($b -le 0.03928) { $b / 12.92 } else { [Math]::Pow(($b + 0.055) / 1.055, 2.4) }
+    return 0.2126 * $rL + 0.7152 * $gL + 0.0722 * $bL
+}
+
+function Get-ContrastRatio {
+    param(
+        [Parameter(Mandatory)] [string] $ForegroundHex,
+        [Parameter(Mandatory)] [string] $BackgroundHex
+    )
+    $fgL = Get-RelativeLuminance -Hex $ForegroundHex
+    $bgL = Get-RelativeLuminance -Hex $BackgroundHex
+    $lighter = [Math]::Max($fgL, $bgL)
+    $darker  = [Math]::Min($fgL, $bgL)
+    return ($lighter + 0.05) / ($darker + 0.05)
+}
+
+# Returns the explicit 6-digit hex value of a w:shd element's fill, or $null
+# if the shading uses a theme reference, "auto", or no fill.
+function Get-ExplicitShadingFill {
+    param([Xml.Linq.XElement] $ShadingParent)
+    if (-not $ShadingParent) { return $null }
+    $shd = Get-ChildElement -Parent $ShadingParent -Namespace $NS.w -LocalName 'shd'
+    if (-not $shd) { return $null }
+    if (-not [string]::IsNullOrEmpty((Get-XAttr -Element $shd -Namespace $NS.w -LocalName 'themeFill'))) { return $null }
+    $fill = Get-XAttr -Element $shd -Namespace $NS.w -LocalName 'fill'
+    if ([string]::IsNullOrEmpty($fill) -or $fill -eq 'auto') { return $null }
+    if ($fill -match '^[0-9A-Fa-f]{6}$') { return $fill }
+    return $null
+}
+
+# --- Rule: LowContrast (WARNING) ---------------------------------------------
+# Best-effort contrast check. Only flags runs where BOTH the foreground (run
+# color) and background (run shading or paragraph shading) are explicit 6-digit
+# hex values. Skips: "auto" colors, themeColor / themeFill references, runs
+# with no explicit color, paragraphs with no explicit shading. False positives
+# from style/theme inheritance are avoided by refusing to guess.
+#
+# Threshold follows WCAG 2.x:
+#   3.0:1 for large text (18pt+, or 14pt+ bold)
+#   4.5:1 otherwise
+# Font size in OOXML is in half-points: 22 -> 11pt (default), 36 -> 18pt,
+# 28 -> 14pt.
+function Test-LowContrast {
+    param([Xml.Linq.XContainer] $Root, [ref] $Issues)
+    if (-not $Root) { return }
+
+    $runs = Get-Descendant -Root $Root -Namespace $NS.w -LocalName 'r'
+    foreach ($run in $runs) {
+        $rPr = Get-ChildElement -Parent $run -Namespace $NS.w -LocalName 'rPr'
+        if (-not $rPr) { continue }
+
+        $colorEl = Get-ChildElement -Parent $rPr -Namespace $NS.w -LocalName 'color'
+        if (-not $colorEl) { continue }
+        if (-not [string]::IsNullOrEmpty((Get-XAttr -Element $colorEl -Namespace $NS.w -LocalName 'themeColor'))) { continue }
+        $fgVal = Get-XAttr -Element $colorEl -Namespace $NS.w -LocalName 'val'
+        if ([string]::IsNullOrEmpty($fgVal) -or $fgVal -eq 'auto') { continue }
+        if ($fgVal -notmatch '^[0-9A-Fa-f]{6}$') { continue }
+
+        $bgVal = Get-ExplicitShadingFill -ShadingParent $rPr
+        if (-not $bgVal) {
+            $p = $run.Parent
+            while ($p -and $p.Name.LocalName -ne 'p') { $p = $p.Parent }
+            if ($p) {
+                $pPr = Get-ChildElement -Parent $p -Namespace $NS.w -LocalName 'pPr'
+                if ($pPr) { $bgVal = Get-ExplicitShadingFill -ShadingParent $pPr }
+            }
+        }
+        if (-not $bgVal) { continue }
+
+        $halfPts = 22
+        $sz = Get-ChildElement -Parent $rPr -Namespace $NS.w -LocalName 'sz'
+        if ($sz) {
+            $szVal = Get-XAttr -Element $sz -Namespace $NS.w -LocalName 'val'
+            $parsed = 0
+            if ([int]::TryParse($szVal, [ref] $parsed)) { $halfPts = $parsed }
+        }
+        $isBold = ($null -ne (Get-ChildElement -Parent $rPr -Namespace $NS.w -LocalName 'b'))
+        $isLarge = ($halfPts -ge 36) -or ($isBold -and $halfPts -ge 28)
+        $threshold = if ($isLarge) { 3.0 } else { 4.5 }
+
+        $ratio = Get-ContrastRatio -ForegroundHex $fgVal -BackgroundHex $bgVal
+        if ($ratio -lt $threshold) {
+            $sb = New-Object System.Text.StringBuilder
+            foreach ($t in (Get-Descendant -Root $run -Namespace $NS.w -LocalName 't')) { [void] $sb.Append($t.Value) }
+            $preview = $sb.ToString()
+            if ([string]::IsNullOrEmpty($preview)) { $preview = '(empty run)' }
+            elseif ($preview.Length -gt 30) { $preview = $preview.Substring(0, 30) + '...' }
+            $Issues.Value += New-Issue -Severity WARNING -RuleName 'LowContrast' `
+                -Description ("Text `"{0}`" has contrast {1:N2}:1 (#{2} on #{3}); WCAG requires {4}:1" -f $preview, $ratio, $fgVal.ToUpper(), $bgVal.ToUpper(), $threshold)
+        }
+    }
 }
 
 # --- Open document and run rules ---------------------------------------------
@@ -533,9 +644,13 @@ try {
             $sdtIdx   = Test-ContentControlTitle  -Root $root -StartIndex $sdtIdx   -Issues $issuesRef
         }
 
-        # TIP rules only matter for detailed mode but cheap to compute always.
+        # TIP rule (always-on; only emitted in detailed mode)
         Test-NoHeadingStyle -Roots $allRoots -Issues $issuesRef
-        Test-ContrastSkipped -Issues $issuesRef
+
+        # WARNING: best-effort contrast check (skips theme/auto colors)
+        foreach ($root in $allRoots) {
+            Test-LowContrast -Root $root -Issues $issuesRef
+        }
 
         $issues = $issuesRef.Value
     }
@@ -566,7 +681,8 @@ if ($Format -eq 'detailed') {
 }
 
 if ($hasError) {
-    Write-Output "FAIL $FilePath"
+    $errorRules = ($issues | Where-Object { $_.Severity -eq 'ERROR' } | Select-Object -ExpandProperty RuleName -Unique) -join ', '
+    Write-Output "FAIL $FilePath`: $errorRules"
     exit 1
 } else {
     Write-Output "PASS $FilePath"
