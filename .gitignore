@@ -1,2 +1,5 @@
 scripts/lib/
 *.dll
+
+# Pester output
+testResults.xml

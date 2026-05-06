@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  lint:
+    name: PSScriptAnalyzer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure PSScriptAnalyzer is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+              Install-Module PSScriptAnalyzer -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+
+      - name: Run lint
+        shell: pwsh
+        run: ./scripts/lint.ps1
+
+  test:
+    name: Pester
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The SDK download is two ~5 MB nupkgs and runs in seconds; caching is
+      # intentionally omitted in v1. If CI time becomes a concern, wire up
+      # actions/cache here keyed on the hash of setup-accessibility-checker.ps1
+      # (the pinned versions live there).
+      - name: Install Open XML SDK
+        shell: pwsh
+        run: ./scripts/setup-accessibility-checker.ps1
+
+      - name: Ensure Pester 5+ is available
+        shell: pwsh
+        run: |
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+
+      - name: Run Pester suite
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'scripts/tests'
+          $config.Run.Exit = $true
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = 'testResults.xml'
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+      - name: Upload Pester results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results
+          path: testResults.xml

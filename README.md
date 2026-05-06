@@ -1,5 +1,7 @@
 # office-accessibility-checker
 
+[![CI](https://github.com/rlorenzo/office-accessibility-checker/actions/workflows/ci.yml/badge.svg)](https://github.com/rlorenzo/office-accessibility-checker/actions/workflows/ci.yml)
+
 CLI accessibility checker for Office Open XML documents (`.docx`/`.docm`,
 `.xlsx`/`.xlsm`). Mirrors veraPDF's invocation shape: feed it a file, get a
 PASS/FAIL line and a meaningful exit code.
@@ -90,7 +92,32 @@ directly with the same parameters.
 - **Red-only number format.** Detection is best-effort against common `[Red]` patterns. Custom numFmt edge cases may slip through.
 - **Localized default sheet names.** The locale list lives in `check-xlsx-accessibility.ps1` as a single named constant; add a regex to extend.
 - **Macro-enabled formats** (`.docm`, `.xlsm`) are treated identically to their non-macro siblings — macros are irrelevant to OOXML structural checks.
-- **Tests / fixtures.** Pester suite and hand-crafted fixtures (planned in §10 of the design doc) are out-of-scope follow-up work.
+
+## Tests
+
+A manifest-driven Pester suite lives under [scripts/tests/](scripts/tests/). It runs each checker against committed accessible/inaccessible Word and Excel fixtures and asserts the exit code + reported rules match [manifest.psd1](scripts/tests/fixtures/manifest.psd1).
+
+```powershell
+# Idempotent: fetches the Open XML SDK + Pester 5 if missing, then runs the suite.
+.\scripts\tests\Invoke-Tests.ps1
+
+# Or, if you've already installed Pester 5+ yourself:
+Invoke-Pester scripts\tests
+```
+
+Fixtures are committed binaries under [scripts/tests/fixtures/](scripts/tests/fixtures/). They're produced by [Build-Fixtures.ps1](scripts/tests/Build-Fixtures.ps1), which writes minimal OOXML packages directly via the Open XML SDK; treat the script as a one-shot regenerator -- run it after editing a rule or fixture builder, then commit the updated binaries in the same PR.
+
+The `DocumentProtected` rule has no fixture: it fires when the package is wrapped in an encrypted Compound File envelope, which the SDK doesn't write. Coverage is intentionally deferred -- if you need it, hand-craft a password-encrypted file and add a manifest entry.
+
+CI runs the lint + test jobs on every push and PR via [.github/workflows/ci.yml](.github/workflows/ci.yml).
+
+## Linting
+
+```powershell
+.\scripts\lint.ps1
+```
+
+Runs PSScriptAnalyzer against `scripts\` using the rules in [PSScriptAnalyzerSettings.psd1](PSScriptAnalyzerSettings.psd1). Exits non-zero on findings at severity ≥ Warning, so it's safe to wire into pre-commit hooks. CI runs the same script.
 
 ## Override the SDK location
 
@@ -108,5 +135,14 @@ scripts/
   check-office-accessibility.ps1    # dispatcher (.docx / .xlsx → right checker)
   check-docx-accessibility.ps1      # Word rules
   check-xlsx-accessibility.ps1      # Excel rules
+  lint.ps1                          # PSScriptAnalyzer wrapper
   lib/                              # gitignored; populated by setup script
+  tests/
+    AccessibilityChecker.Tests.ps1  # manifest-driven Pester suite
+    Build-Fixtures.ps1              # one-shot regenerator (run when rules change)
+    Invoke-Tests.ps1                # local convenience wrapper
+    fixtures/
+      manifest.psd1                 # filename → expected exit + rule names
+      *.docx, *.xlsx                # committed; rebuild via Build-Fixtures.ps1
+.github/workflows/ci.yml            # lint + test on windows-latest
 ```
