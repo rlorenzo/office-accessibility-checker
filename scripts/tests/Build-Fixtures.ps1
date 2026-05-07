@@ -374,6 +374,64 @@ function Build-WordNoHeadingStyles {
     Build-WordFixture -Path $Path -DocumentXml (Get-WordDocumentXml $body)
 }
 
+function Build-WordLayoutTable {
+    param([string] $Path)
+    # Table flagged as a layout table via w:tblDescription. First row has no
+    # tblHeader, but the description signals "this is for visual arrangement,
+    # not tabular data" -- so the MissingTableHeaders rule must skip it.
+    $layoutTable = @'
+<w:tbl>
+  <w:tblPr>
+    <w:tblW w:w="4000" w:type="dxa"/>
+    <w:tblDescription w:val="Photo grid -- layout only"/>
+  </w:tblPr>
+  <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+  <w:tr>
+    <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>
+    <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>
+  </w:tr>
+  <w:tr>
+    <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc>
+    <w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>2</w:t></w:r></w:p></w:tc>
+  </w:tr>
+</w:tbl>
+'@
+    $body = @(
+        Get-WordParagraph -Text 'Document Title' -Style 'Heading1'
+        Get-WordParagraph -Text 'Body text.'
+        Get-WordParagraph -InnerXml (Get-WordInlineDrawing -Id 1 -Descr 'Company logo')
+        $layoutTable
+        Get-WordContentControl -Title 'My Field'
+    ) -join "`n"
+    Build-WordFixture -Path $Path -DocumentXml (Get-WordDocumentXml $body)
+}
+
+function Build-WordLowContrast {
+    param([string] $Path)
+    # One run with explicit light-grey color (CCCCCC) on explicit white run
+    # shading (FFFFFF). Computed contrast ratio is ~1.61:1 -- well below the
+    # WCAG 4.5:1 normal-text threshold, so the LowContrast rule fires.
+    $lowContrastPara = @'
+<w:p>
+  <w:r>
+    <w:rPr>
+      <w:color w:val="CCCCCC"/>
+      <w:shd w:val="clear" w:color="auto" w:fill="FFFFFF"/>
+    </w:rPr>
+    <w:t xml:space="preserve">Hard to read</w:t>
+  </w:r>
+</w:p>
+'@
+    $body = @(
+        Get-WordParagraph -Text 'Document Title' -Style 'Heading1'
+        $lowContrastPara
+        Get-WordParagraph -InnerXml (Get-WordInlineDrawing -Id 1 -Descr 'Company logo')
+        Get-WordTable -HasHeader $true
+        Get-WordContentControl -Title 'My Field'
+    ) -join "`n"
+    Build-WordFixture -Path $Path -DocumentXml (Get-WordDocumentXml $body)
+}
+
 # --- Excel: build a workbook by composing parts -----------------------------
 
 # Common namespaces used in Excel parts
@@ -609,6 +667,54 @@ function Build-XlsxDefaultTableName {
     Build-XlsxFixture -Path $Path -TableName 'Table1'
 }
 
+# Styles for the LowContrast fixture: font 1 has explicit grey CCCCCC, fill 2
+# is solid white, cellXf 1 references both. Computed contrast ~1.61:1.
+function Get-XlsxStylesXmlLowContrast {
+    @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="$($XlsxNs.s)">
+  <fonts count="2">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><sz val="11"/><name val="Calibri"/><color rgb="FFCCCCCC"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFFFFF"/></patternFill></fill>
+  </fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="2">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
+  </cellXfs>
+</styleSheet>
+"@
+}
+
+function Build-XlsxLowContrast {
+    param([string] $Path)
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+    $type = [DocumentFormat.OpenXml.SpreadsheetDocumentType]::Workbook
+    $doc = [DocumentFormat.OpenXml.Packaging.SpreadsheetDocument]::Create($Path, $type)
+    try {
+        $wbPart = $doc.AddWorkbookPart()
+        $wsPart = Add-OpenXmlPart -Container $wbPart -PartType ([DocumentFormat.OpenXml.Packaging.WorksheetPart]) -RelId 'rId1'
+        $stylesPart = Add-OpenXmlPart -Container $wbPart -PartType ([DocumentFormat.OpenXml.Packaging.WorkbookStylesPart]) -RelId 'rId2'
+        $tablePart = Add-OpenXmlPart -Container $wsPart -PartType ([DocumentFormat.OpenXml.Packaging.TableDefinitionPart]) -RelId 'rIdTable'
+        $drawingPart = Add-OpenXmlPart -Container $wsPart -PartType ([DocumentFormat.OpenXml.Packaging.DrawingsPart]) -RelId 'rIdDrawing'
+
+        Set-PartXml -Part $tablePart -Xml (Get-XlsxTableXml -Name 'Inventory' -DisplayName 'Inventory' -HeaderRowCount 1)
+        Set-PartXml -Part $drawingPart -Xml (Get-XlsxDrawingXml -Descr 'Logo')
+        # Cell A1 uses cellXf 1 -> font 1 (grey) on fill 2 (white).
+        Set-PartXml -Part $wsPart -Xml (Get-XlsxWorksheetXml -DrawingRelId 'rIdDrawing' -TableRelId 'rIdTable' -StyleIndexForA1 1)
+        Set-PartXml -Part $stylesPart -Xml (Get-XlsxStylesXmlLowContrast)
+        Set-PartXml -Part $wbPart -Xml (Get-XlsxWorkbookXml -SheetName 'Inventory' -SheetRelId 'rId1')
+    } finally {
+        $doc.Dispose()
+    }
+}
+
 # --- Drive every builder ----------------------------------------------------
 
 $builders = @(
@@ -621,6 +727,8 @@ $builders = @(
     @{ Name = 'word-floating-object.docx';                Build = { param($p) Build-WordFloatingObject                -Path $p } }
     @{ Name = 'word-repeated-blanks.docx';                Build = { param($p) Build-WordRepeatedBlanks                -Path $p } }
     @{ Name = 'word-no-heading-styles.docx';              Build = { param($p) Build-WordNoHeadingStyles               -Path $p } }
+    @{ Name = 'word-low-contrast.docx';                   Build = { param($p) Build-WordLowContrast                   -Path $p } }
+    @{ Name = 'word-layout-table.docx';                   Build = { param($p) Build-WordLayoutTable                   -Path $p } }
     @{ Name = 'excel-accessible-baseline.xlsx';           Build = { param($p) Build-XlsxAccessibleBaseline            -Path $p } }
     @{ Name = 'excel-missing-alt-text.xlsx';              Build = { param($p) Build-XlsxMissingAltText                -Path $p } }
     @{ Name = 'excel-missing-table-headers.xlsx';         Build = { param($p) Build-XlsxMissingTableHeaders           -Path $p } }
@@ -628,6 +736,7 @@ $builders = @(
     @{ Name = 'excel-merged-cells.xlsx';                  Build = { param($p) Build-XlsxMergedCells                   -Path $p } }
     @{ Name = 'excel-default-sheet-tab-name.xlsx';        Build = { param($p) Build-XlsxDefaultSheetTabName           -Path $p } }
     @{ Name = 'excel-default-table-name.xlsx';            Build = { param($p) Build-XlsxDefaultTableName              -Path $p } }
+    @{ Name = 'excel-low-contrast.xlsx';                  Build = { param($p) Build-XlsxLowContrast                   -Path $p } }
 )
 
 foreach ($b in $builders) {

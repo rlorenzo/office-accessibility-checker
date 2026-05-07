@@ -20,7 +20,7 @@
             MustNotContain = @(
                 'MissingAltText', 'MissingTableHeaders', 'MissingContentControlTitle',
                 'MergedTableCells', 'HeadingOrderSkip', 'FloatingObject',
-                'RepeatedBlanks', 'NoHeadingStyles'
+                'RepeatedBlanks', 'NoHeadingStyles', 'LowContrast'
             )
             Notes          = 'Heading 1, alt-tagged inline image, table with repeating header row, content control with title.'
         },
@@ -82,6 +82,20 @@
             MustNotContain = @()
             Notes          = 'Document with body text only -- no Heading 1/2/3 styles applied anywhere.'
         },
+        @{
+            File           = 'word-low-contrast.docx'
+            ExpectedExit   = 0
+            MustContain    = @('LowContrast')
+            MustNotContain = @()
+            Notes          = 'One run with explicit light-grey color on white run shading (~1.6:1 contrast).'
+        },
+        @{
+            File           = 'word-layout-table.docx'
+            ExpectedExit   = 0
+            MustContain    = @()
+            MustNotContain = @('MissingTableHeaders')
+            Notes          = 'Table marked as layout via w:tblDescription with no header row -- MissingTableHeaders must skip it.'
+        },
 
         # --- Excel: accessible baseline ------------------------------------
         @{
@@ -90,7 +104,7 @@
             MustContain    = @()
             MustNotContain = @(
                 'MissingAltText', 'MissingTableHeaders', 'RedOnlyNegativeFormatting',
-                'MergedCells', 'DefaultSheetTabName', 'DefaultTableName'
+                'MergedCells', 'DefaultSheetTabName', 'DefaultTableName', 'LowContrast'
             )
             Notes          = 'Sheet renamed away from "Sheet1", named table "Inventory" with header row, alt-tagged image.'
         },
@@ -137,6 +151,13 @@
             MustContain    = @('DefaultTableName')
             MustNotContain = @()
             Notes          = 'Insert > Table accepting the auto-assigned "Table1" name.'
+        },
+        @{
+            File           = 'excel-low-contrast.xlsx'
+            ExpectedExit   = 0
+            MustContain    = @('LowContrast')
+            MustNotContain = @()
+            Notes          = 'Cell A1 styled with explicit light-grey font on solid white fill (~1.6:1 contrast).'
         }
     )
 }

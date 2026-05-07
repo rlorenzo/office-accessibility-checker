@@ -23,12 +23,15 @@ The setup script downloads the Open XML SDK DLLs into `scripts\lib\` (gitignored
 
 ## Usage
 
-Text mode (default) emits a single PASS/FAIL line. Detailed mode emits every issue found, one per line, followed by a PASS/FAIL summary.
+The `-Format` parameter selects the output mode:
+
+- `text` (default): a single PASS/FAIL line. On failure the line names the failing rules: `FAIL <path>: MissingAltText, MissingTableHeaders`.
+- `detailed`: every issue found, one tab-separated line each (`SEVERITY<TAB>RuleName<TAB>Description`), followed by the PASS/FAIL summary.
 
 ```powershell
 .\scripts\check-office-accessibility.ps1 path\to\file.xlsx -Format detailed
 # WARNING  MergedCells          Sheet "Sheet1" contains merged cells
-# TIP      ContrastSkipped      Contrast check skipped (requires rendering)
+# TIP      DefaultTableName     Table name "Table1" matches the auto-assigned default
 # PASS path\to\file.xlsx
 ```
 
@@ -41,7 +44,7 @@ Pass a directory instead of a file to scan many files in one invocation. Support
 ```powershell
 .\scripts\check-office-accessibility.ps1 path\to\folder
 # PASS path\to\folder\report.docx
-# FAIL path\to\folder\budget.xlsx
+# FAIL path\to\folder\budget.xlsx: MissingAltText
 # PASS path\to\folder\memo.docx
 ```
 
@@ -52,6 +55,18 @@ Subdirectories are not descended into by default. Add `-Recurse` to walk the tre
 ```
 
 A summary footer is written to **stderr** (`Scanned N files: X passed, Y failed, Z errors, W skipped`), so stdout stays clean for piping. A single corrupt or unreadable file does not halt the scan; it produces an `ERROR <path>` line on stdout and the scan continues. The aggregate exit code is the worst per-file exit (0 if all passed, 1 if any accessibility errors, 2 if any tool errors).
+
+## Severity levels
+
+Each rule has one of three severities (matching Microsoft's Accessibility Checker categories):
+
+| Severity | Meaning | Affects exit code |
+|----------|---------|-------------------|
+| ERROR    | Content people with disabilities likely cannot understand. | Yes (exit 1). |
+| WARNING  | Content is hard to understand. | No. |
+| TIP      | Content is understandable but could be improved. | No. |
+
+In text mode, only ERRORs cause `FAIL`. In detailed mode, every issue is listed regardless of severity.
 
 ## Exit codes
 
@@ -76,15 +91,15 @@ A summary footer is written to **stderr** (`Scanned N files: X passed, Y failed,
 | Severity | Rule | What it checks |
 |----------|------|----------------|
 | ERROR    | `MissingAltText` | Every drawing in body, headers, footers, and groups has alt text, a title, or `decorative="1"`. |
-| ERROR    | `MissingTableHeaders` | First row carries `w:trPr/w:tblHeader` (the semantic table-header marker). Visual first-row styling via `tblLook` is intentionally **not** accepted, since accepting it would let tables that look like they have headers pass while exposing nothing to screen readers. |
+| ERROR    | `MissingTableHeaders` | First row carries `w:trPr/w:tblHeader` (the semantic table-header marker). Visual first-row styling via `tblLook` is intentionally **not** accepted, since accepting it would let tables that look like they have headers pass while exposing nothing to screen readers. Tables marked as layout-only via `w:tblPr/w:tblDescription` are exempt. |
 | ERROR    | `MissingContentControlTitle` | Every `w:sdt` has a non-empty `w:alias`. |
 | ERROR    | `DocumentProtected` | File is IRM- or password-protected (Restrict Editing is **not** flagged). |
 | WARNING  | `MergedTableCells` | Tables with merged or nested cells. |
 | WARNING  | `HeadingOrderSkip` | Heading levels skip (e.g., Heading1 to Heading3). |
 | WARNING  | `FloatingObject` | Drawings using `wp:anchor` (not inline). |
 | WARNING  | `RepeatedBlanks` | 3+ consecutive spaces or non-breaking spaces. Tabs are intentionally **not** flagged (Microsoft's own remediation advice is to use tabs). |
+| WARNING  | `LowContrast` | Best-effort. Flags runs whose foreground (`w:rPr/w:color`) and background (run or paragraph `w:shd/@w:fill`) are both explicit hex values and whose WCAG contrast ratio falls below 4.5:1 (3:1 for 18pt+ text or 14pt+ bold). Theme references, "auto" colors, and style/theme inheritance are skipped. |
 | TIP      | `NoHeadingStyles` | Document has no Heading-style paragraphs anywhere. |
-| TIP      | `ContrastSkipped` | Always emitted; contrast cannot be checked without rendering. |
 
 ### Excel
 
@@ -96,12 +111,12 @@ A summary footer is written to **stderr** (`Scanned N files: X passed, Y failed,
 | ERROR    | `DocumentProtected` | Workbook is IRM- or password-protected (workbook/sheet protection is **not** flagged). |
 | WARNING  | `MergedCells` | Worksheet has any `<mergeCells>` entries (sheet-wide check, not table-scoped). |
 | WARNING  | `DefaultSheetTabName` | Sheet tab matches a default placeholder (`Sheet1`, `Tabelle1`, `Feuil1`, `Hoja1`, `Foglio1`, `Planilha1`, `シート1`, etc.). Add locales by editing the regex array at the top of the script. |
+| WARNING  | `LowContrast` | Best-effort. Flags cells whose font color and cell fill are both explicit RGB values and whose WCAG contrast ratio falls below 4.5:1. Theme references, indexed-palette colors, "auto", non-solid fills, and conditional formatting are skipped. |
 | TIP      | `DefaultTableName` | Table name matches `^Table\d+$`. |
-| TIP      | `ContrastSkipped` | Always emitted. |
 
 ## Known limitations
 
-- **Contrast.** Cannot be checked without rendering. A single TIP records this.
+- **Contrast.** Best-effort only (`LowContrast` rule). The check requires both foreground and background to be explicit RGB values; runs/cells whose colors come from theme references, "auto", indexed palettes, style inheritance, or conditional formatting are skipped because resolving them faithfully requires rendering. Expect false negatives for documents that rely on themed colors.
 - **Red-only number format.** Detection is best-effort against common `[Red]` patterns. Custom numFmt edge cases may slip through.
 - **Localized default sheet names.** The locale list lives in `check-xlsx-accessibility.ps1` as a single named constant; add a regex to extend.
 - **Macro-enabled formats** (`.docm`, `.xlsm`) are treated identically to their non-macro siblings, since macros are irrelevant to OOXML structural checks.
