@@ -34,6 +34,25 @@ Text mode (default) emits a single PASS/FAIL line. Detailed mode emits every iss
 
 The dispatcher picks the right checker based on file extension. You can also call `check-docx-accessibility.ps1` or `check-xlsx-accessibility.ps1` directly with the same parameters.
 
+### Bulk scan
+
+Pass a directory instead of a file to scan many files in one invocation. Supported extensions (`.docx`, `.docm`, `.xlsx`, `.xlsm`) are picked up; everything else is silently skipped. Office lock files (`~$*`) are ignored.
+
+```powershell
+.\scripts\check-office-accessibility.ps1 path\to\folder
+# PASS path\to\folder\report.docx
+# FAIL path\to\folder\budget.xlsx
+# PASS path\to\folder\memo.docx
+```
+
+Subdirectories are not descended into by default. Add `-Recurse` to walk the tree:
+
+```powershell
+.\scripts\check-office-accessibility.ps1 path\to\folder -Recurse -Format detailed
+```
+
+A summary footer is written to **stderr** (`Scanned N files: X passed, Y failed, Z errors, W skipped`), so stdout stays clean for piping. A single corrupt or unreadable file does not halt the scan; it produces an `ERROR <path>` line on stdout and the scan continues. The aggregate exit code is the worst per-file exit (0 if all passed, 1 if any accessibility errors, 2 if any tool errors).
+
 ## Exit codes
 
 | Code | Meaning |
