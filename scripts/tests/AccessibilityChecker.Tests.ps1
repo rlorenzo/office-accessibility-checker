@@ -46,6 +46,26 @@ BeforeAll {
             RuleNames = @($rules)
         }
     }
+
+    function Invoke-Bulk {
+        param(
+            [Parameter(Mandatory)] [string] $Path,
+            [switch] $Recurse,
+            [string] $Format = 'text'
+        )
+        $invokeArgs = @{ Path = $Path; Format = $Format }
+        if ($Recurse) { $invokeArgs.Recurse = $true }
+        $stdout = & $script:CheckerPath @invokeArgs 2>$null
+        $exit   = $LASTEXITCODE
+        $lines  = @($stdout | ForEach-Object { [string]$_ })
+        [pscustomobject]@{
+            ExitCode = $exit
+            Lines    = $lines
+            Pass     = @($lines | Where-Object { $_ -like 'PASS *' }).Count
+            Fail     = @($lines | Where-Object { $_ -like 'FAIL *' }).Count
+            Error    = @($lines | Where-Object { $_ -like 'ERROR *' }).Count
+        }
+    }
 }
 
 Describe 'Office accessibility checker' {
@@ -95,6 +115,107 @@ Describe 'Office accessibility checker' {
                     ($result.RuleNames -join ', ')
                 )
             }
+        }
+    }
+
+    Context 'Bulk scan' {
+        BeforeEach {
+            $script:BulkDir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $script:BulkDir | Out-Null
+        }
+
+        It 'all accessible files: exit 0 with one PASS per file' {
+            'word-accessible-baseline.docx',
+            'excel-accessible-baseline.xlsx' | ForEach-Object {
+                Copy-Item -LiteralPath (Join-Path $script:FixtureDir $_) -Destination $script:BulkDir
+            }
+
+            $result = Invoke-Bulk -Path $script:BulkDir
+            $result.ExitCode | Should -Be 0
+            $result.Pass     | Should -Be 2
+            $result.Fail     | Should -Be 0
+            $result.Error    | Should -Be 0
+        }
+
+        It 'mixed pass/fail: exits 1 and reports both' {
+            'word-accessible-baseline.docx',
+            'excel-accessible-baseline.xlsx',
+            'word-missing-alt-text.docx' | ForEach-Object {
+                Copy-Item -LiteralPath (Join-Path $script:FixtureDir $_) -Destination $script:BulkDir
+            }
+
+            $result = Invoke-Bulk -Path $script:BulkDir
+            $result.ExitCode | Should -Be 1
+            $result.Pass     | Should -Be 2
+            $result.Fail     | Should -Be 1
+            $result.Error    | Should -Be 0
+        }
+
+        It 'does not descend into subdirectories without -Recurse' {
+            $sub = Join-Path $script:BulkDir 'nested'
+            New-Item -ItemType Directory -Path $sub | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:FixtureDir 'word-accessible-baseline.docx') -Destination $sub
+
+            $result = Invoke-Bulk -Path $script:BulkDir
+            $result.ExitCode | Should -Be 0
+            $result.Pass     | Should -Be 0
+            $result.Fail     | Should -Be 0
+            $result.Error    | Should -Be 0
+        }
+
+        It '-Recurse picks up fixtures in subdirectories' {
+            $sub = Join-Path $script:BulkDir 'nested'
+            New-Item -ItemType Directory -Path $sub | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:FixtureDir 'word-accessible-baseline.docx') -Destination $sub
+
+            $result = Invoke-Bulk -Path $script:BulkDir -Recurse
+            $result.ExitCode | Should -Be 0
+            $result.Pass     | Should -Be 1
+        }
+
+        It 'silently skips unsupported extensions' {
+            Copy-Item -LiteralPath (Join-Path $script:FixtureDir 'word-accessible-baseline.docx') -Destination $script:BulkDir
+            'irrelevant content' | Set-Content -LiteralPath (Join-Path $script:BulkDir 'notes.txt')
+            'irrelevant content' | Set-Content -LiteralPath (Join-Path $script:BulkDir 'report.pdf')
+
+            $result = Invoke-Bulk -Path $script:BulkDir
+            $result.ExitCode | Should -Be 0
+            $result.Pass     | Should -Be 1
+            $result.Error    | Should -Be 0
+        }
+
+        It 'collect-and-continue: a corrupt file does not halt the scan' {
+            Copy-Item -LiteralPath (Join-Path $script:FixtureDir 'word-accessible-baseline.docx') -Destination $script:BulkDir
+            # Zero-byte file with valid extension. The SDK throws FileFormatException
+            # on Open(), which the per-format checker sniffs and surfaces as
+            # DocumentProtected (exit 1). Exit 2 (true tool errors) is reserved
+            # for IOException / SDK-missing paths -- not reliably reproducible
+            # from a unit test, so this case validates only the exit-1 path.
+            New-Item -ItemType File -Path (Join-Path $script:BulkDir 'corrupt.docx') | Out-Null
+
+            $result = Invoke-Bulk -Path $script:BulkDir
+            $result.ExitCode | Should -Be 1
+            $result.Pass     | Should -Be 1 -Because 'the good fixture must still be scanned after the corrupt one fails'
+            $result.Fail     | Should -Be 1
+        }
+
+        It 'empty directory: exit 0' {
+            $result = Invoke-Bulk -Path $script:BulkDir
+            $result.ExitCode | Should -Be 0
+            $result.Pass     | Should -Be 0
+            $result.Fail     | Should -Be 0
+            $result.Error    | Should -Be 0
+        }
+
+        It 'ignores Office lock files (~$*)' {
+            Copy-Item -LiteralPath (Join-Path $script:FixtureDir 'word-accessible-baseline.docx') -Destination $script:BulkDir
+            # ~$ files are zero-byte by convention; they would otherwise fail noisily.
+            New-Item -ItemType File -Path (Join-Path $script:BulkDir '~$lock.docx') | Out-Null
+
+            $result = Invoke-Bulk -Path $script:BulkDir
+            $result.ExitCode | Should -Be 0
+            $result.Pass     | Should -Be 1
+            $result.Error    | Should -Be 0
         }
     }
 }
