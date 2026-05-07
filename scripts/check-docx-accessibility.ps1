@@ -18,11 +18,21 @@
     'text' (default) emits only PASS/FAIL. 'detailed' emits one tab-separated
     issue per line plus the PASS/FAIL summary.
 
+.PARAMETER Fix
+    When set, after running the checks the script writes a sibling file named
+    <basename>.fixed.docx with deterministic structural remediations applied
+    for the rules MissingTableHeaders, RepeatedBlanks, and LowContrast. The
+    original file is never modified. After fixing, the checker is re-run on
+    the fixed file and its PASS/FAIL is appended.
+
 .OUTPUTS
     Exit codes:
       0  no errors found (warnings/tips do not fail)
       1  one or more accessibility errors found (includes IRM/password-protected files)
       2  tool error (file not found, unsupported format, SDK load failure, file locked)
+
+      With -Fix, the exit code reflects the FIXED file when fixes were applied,
+      otherwise the original file.
 #>
 
 [CmdletBinding()]
@@ -31,7 +41,9 @@ param(
     [string] $FilePath,
 
     [ValidateSet('text','detailed')]
-    [string] $Format = 'text'
+    [string] $Format = 'text',
+
+    [switch] $Fix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -565,6 +577,222 @@ function Test-LowContrast {
     }
 }
 
+# --- Autofix helpers ---------------------------------------------------------
+# Scope: only the rules whose remediation is a deterministic structural OOXML
+# edit. Anything that requires authoring (alt text, content control title,
+# heading promotion, descriptive link text), is destructive (unmerge cells,
+# remove protection), or changes layout (anchor -> inline) is intentionally
+# out of scope.
+#
+# All fix functions mutate the supplied XDocument in place and return the
+# count of items they fixed. Saving the part is the caller's job.
+
+# HSL <-> sRGB conversion. Used by Get-NearestPassingForeground to find the
+# perceptually-closest foreground color (preserving hue and saturation) that
+# meets a given WCAG contrast ratio against a fixed background. CIELCh would
+# be more uniform but HSL is good enough for "nudge until it passes" and keeps
+# the math (and the runtime cost per low-contrast run) small.
+function ConvertTo-Hsl {
+    param([Parameter(Mandatory)] [string] $Hex)
+    $r = [Convert]::ToInt32($Hex.Substring(0, 2), 16) / 255.0
+    $g = [Convert]::ToInt32($Hex.Substring(2, 2), 16) / 255.0
+    $b = [Convert]::ToInt32($Hex.Substring(4, 2), 16) / 255.0
+    $max = [Math]::Max([Math]::Max($r, $g), $b)
+    $min = [Math]::Min([Math]::Min($r, $g), $b)
+    $L = ($max + $min) / 2.0
+    if ($max -eq $min) { return [pscustomobject]@{ H = 0.0; S = 0.0; L = $L } }
+    $d = $max - $min
+    $S = if ($L -gt 0.5) { $d / (2.0 - $max - $min) } else { $d / ($max + $min) }
+    $H = 0.0
+    if     ($max -eq $r) { $H = (($g - $b) / $d) + ($(if ($g -lt $b) { 6.0 } else { 0.0 })) }
+    elseif ($max -eq $g) { $H = (($b - $r) / $d) + 2.0 }
+    else                 { $H = (($r - $g) / $d) + 4.0 }
+    return [pscustomobject]@{ H = ($H / 6.0); S = $S; L = $L }
+}
+
+function Get-HueChannel {
+    param([double] $p, [double] $q, [double] $t)
+    if ($t -lt 0) { $t += 1 }
+    if ($t -gt 1) { $t -= 1 }
+    if ($t -lt (1.0 / 6.0)) { return $p + ($q - $p) * 6.0 * $t }
+    if ($t -lt 0.5) { return $q }
+    if ($t -lt (2.0 / 3.0)) { return $p + ($q - $p) * ((2.0 / 3.0) - $t) * 6.0 }
+    return $p
+}
+
+function ConvertFrom-Hsl {
+    param([Parameter(Mandatory)] [double] $H,
+          [Parameter(Mandatory)] [double] $S,
+          [Parameter(Mandatory)] [double] $L)
+    if ($S -eq 0) { $r = $L; $g = $L; $b = $L }
+    else {
+        $q = if ($L -lt 0.5) { $L * (1.0 + $S) } else { $L + $S - ($L * $S) }
+        $p = (2.0 * $L) - $q
+        $r = Get-HueChannel $p $q ($H + (1.0 / 3.0))
+        $g = Get-HueChannel $p $q $H
+        $b = Get-HueChannel $p $q ($H - (1.0 / 3.0))
+    }
+    $rByte = [int][Math]::Round($r * 255)
+    $gByte = [int][Math]::Round($g * 255)
+    $bByte = [int][Math]::Round($b * 255)
+    return ('{0:X2}{1:X2}{2:X2}' -f $rByte, $gByte, $bByte)
+}
+
+# Find the smallest |L - L_orig| at which the foreground passes contrast.
+# Search both directions (darkening, lightening) and pick the closer side.
+# Step 0.005 = 200 candidates per direction worst-case; far smaller in practice.
+function Get-NearestPassingForeground {
+    param(
+        [Parameter(Mandatory)] [string] $ForegroundHex,
+        [Parameter(Mandatory)] [string] $BackgroundHex,
+        [double] $Threshold = 4.5
+    )
+    if ((Get-ContrastRatio -ForegroundHex $ForegroundHex -BackgroundHex $BackgroundHex) -ge $Threshold) {
+        return $ForegroundHex
+    }
+    $hsl = ConvertTo-Hsl -Hex $ForegroundHex
+    $step = 0.005
+
+    $bestDark = $null; $deltaDark = [double]::PositiveInfinity
+    for ($L = $hsl.L - $step; $L -ge 0; $L -= $step) {
+        $cand = ConvertFrom-Hsl -H $hsl.H -S $hsl.S -L $L
+        if ((Get-ContrastRatio -ForegroundHex $cand -BackgroundHex $BackgroundHex) -ge $Threshold) {
+            $bestDark = $cand; $deltaDark = $hsl.L - $L; break
+        }
+    }
+    $bestLight = $null; $deltaLight = [double]::PositiveInfinity
+    for ($L = $hsl.L + $step; $L -le 1; $L += $step) {
+        $cand = ConvertFrom-Hsl -H $hsl.H -S $hsl.S -L $L
+        if ((Get-ContrastRatio -ForegroundHex $cand -BackgroundHex $BackgroundHex) -ge $Threshold) {
+            $bestLight = $cand; $deltaLight = $L - $hsl.L; break
+        }
+    }
+    if ($bestDark -and $deltaDark -le $deltaLight) { return $bestDark }
+    if ($bestLight) { return $bestLight }
+
+    # Mid-tone bg with no passing color along the lightness axis: fall back to
+    # whichever pole has more contrast headroom.
+    $blackR = Get-ContrastRatio -ForegroundHex '000000' -BackgroundHex $BackgroundHex
+    $whiteR = Get-ContrastRatio -ForegroundHex 'FFFFFF' -BackgroundHex $BackgroundHex
+    if ($blackR -ge $whiteR) { return '000000' } else { return 'FFFFFF' }
+}
+
+function Repair-WordTableHeader {
+    param([Xml.Linq.XContainer] $Root)
+    if (-not $Root) { return 0 }
+    $fixed = 0
+    $tables = Get-Descendant -Root $Root -Namespace $NS.w -LocalName 'tbl'
+    foreach ($tbl in $tables) {
+        $rows = $tbl.Elements([Xml.Linq.XName]::Get('tr', $NS.w))
+        if (-not $rows -or $rows.Count -eq 0) { continue }
+
+        $tblPr = Get-ChildElement -Parent $tbl -Namespace $NS.w -LocalName 'tblPr'
+        if ($tblPr) {
+            # Layout-table opt-out: skip tables that declare themselves as
+            # layout via tblDescription, matching the rule.
+            if (Get-ChildElement -Parent $tblPr -Namespace $NS.w -LocalName 'tblDescription') { continue }
+        }
+
+        $firstRow = $rows | Select-Object -First 1
+        $trPr = Get-ChildElement -Parent $firstRow -Namespace $NS.w -LocalName 'trPr'
+        if ($trPr -and (Get-ChildElement -Parent $trPr -Namespace $NS.w -LocalName 'tblHeader')) { continue }
+
+        if (-not $trPr) {
+            $trPr = New-Object Xml.Linq.XElement -ArgumentList ([Xml.Linq.XName]::Get('trPr', $NS.w))
+            # w:trPr must be the first child of w:tr per the schema.
+            $firstRow.AddFirst($trPr)
+        }
+        $tblHeader = New-Object Xml.Linq.XElement -ArgumentList ([Xml.Linq.XName]::Get('tblHeader', $NS.w))
+        $trPr.Add($tblHeader)
+        $fixed++
+    }
+    return $fixed
+}
+
+# Replace runs of 3+ space (U+0020) or NBSP (U+00A0) with a single tab character
+# inside each w:t element. Cross-w:t blank runs are not handled (the typical
+# case is "user typed N spaces in one run"); they would require splitting and
+# re-stitching runs, which we deliberately avoid. xml:space="preserve" must be
+# set on any modified w:t so the tab survives serialization.
+function Repair-WordRepeatedBlank {
+    param([Xml.Linq.XContainer] $Root)
+    if (-not $Root) { return 0 }
+    $fixed = 0
+    $texts = Get-Descendant -Root $Root -Namespace $NS.w -LocalName 't'
+    foreach ($t in $texts) {
+        $orig = $t.Value
+        if ($orig -notmatch '[  ]{3,}') { continue }
+        $new = [regex]::Replace($orig, "[  ]{3,}", "`t")
+        if ($new -eq $orig) { continue }
+        $t.Value = $new
+        $xmlNs = 'http://www.w3.org/XML/1998/namespace'
+        $existing = $t.Attribute([Xml.Linq.XName]::Get('space', $xmlNs))
+        if (-not $existing) {
+            $t.SetAttributeValue([Xml.Linq.XName]::Get('space', $xmlNs), 'preserve')
+        }
+        $fixed++
+    }
+    return $fixed
+}
+
+function Repair-WordLowContrast {
+    param([Xml.Linq.XContainer] $Root)
+    if (-not $Root) { return 0 }
+    $fixed = 0
+    $runs = Get-Descendant -Root $Root -Namespace $NS.w -LocalName 'r'
+    foreach ($run in $runs) {
+        $rPr = Get-ChildElement -Parent $run -Namespace $NS.w -LocalName 'rPr'
+        if (-not $rPr) { continue }
+        $colorEl = Get-ChildElement -Parent $rPr -Namespace $NS.w -LocalName 'color'
+        if (-not $colorEl) { continue }
+        if (-not [string]::IsNullOrEmpty((Get-XAttr -Element $colorEl -Namespace $NS.w -LocalName 'themeColor'))) { continue }
+        $fgVal = Get-XAttr -Element $colorEl -Namespace $NS.w -LocalName 'val'
+        if ([string]::IsNullOrEmpty($fgVal) -or $fgVal -eq 'auto') { continue }
+        if ($fgVal -notmatch '^[0-9A-Fa-f]{6}$') { continue }
+
+        $bgVal = Get-ExplicitShadingFill -ShadingParent $rPr
+        if (-not $bgVal) {
+            $p = $run.Parent
+            while ($p -and $p.Name.LocalName -ne 'p') { $p = $p.Parent }
+            if ($p) {
+                $pPr = Get-ChildElement -Parent $p -Namespace $NS.w -LocalName 'pPr'
+                if ($pPr) { $bgVal = Get-ExplicitShadingFill -ShadingParent $pPr }
+            }
+        }
+        if (-not $bgVal) { continue }
+
+        $halfPts = 22
+        $sz = Get-ChildElement -Parent $rPr -Namespace $NS.w -LocalName 'sz'
+        if ($sz) {
+            $szVal = Get-XAttr -Element $sz -Namespace $NS.w -LocalName 'val'
+            $parsed = 0
+            if ([int]::TryParse($szVal, [ref] $parsed)) { $halfPts = $parsed }
+        }
+        $isBold = ($null -ne (Get-ChildElement -Parent $rPr -Namespace $NS.w -LocalName 'b'))
+        $isLarge = ($halfPts -ge 36) -or ($isBold -and $halfPts -ge 28)
+        $threshold = if ($isLarge) { 3.0 } else { 4.5 }
+
+        if ((Get-ContrastRatio -ForegroundHex $fgVal -BackgroundHex $bgVal) -ge $threshold) { continue }
+
+        $newFg = Get-NearestPassingForeground -ForegroundHex $fgVal -BackgroundHex $bgVal -Threshold $threshold
+        if ($newFg -and $newFg -ne $fgVal.ToUpper()) {
+            $colorEl.SetAttributeValue([Xml.Linq.XName]::Get('val', $NS.w), $newFg)
+            $fixed++
+        }
+    }
+    return $fixed
+}
+
+function Save-PartXDocument {
+    param($Part, [Xml.Linq.XDocument] $Document)
+    $stream = $Part.GetStream([IO.FileMode]::Create, [IO.FileAccess]::Write)
+    try {
+        $Document.Save($stream)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 # --- Open document and run rules ---------------------------------------------
 $issues = @()
 $doc = $null
@@ -683,8 +911,81 @@ if ($Format -eq 'detailed') {
 if ($hasError) {
     $errorRules = ($issues | Where-Object { $_.Severity -eq 'ERROR' } | Select-Object -ExpandProperty RuleName -Unique) -join ', '
     Write-Output "FAIL $FilePath`: $errorRules"
-    exit 1
+    $originalExit = 1
 } else {
     Write-Output "PASS $FilePath"
-    exit 0
+    $originalExit = 0
 }
+
+# --- Autofix ------------------------------------------------------------------
+# Applies only the deterministic structural remediations; everything else
+# requires authoring or layout judgment and is intentionally skipped. The
+# original is never touched: we copy to <basename>.fixed.docx and edit the copy.
+if (-not $Fix) { exit $originalExit }
+
+$fixableRuleNames = @('MissingTableHeaders', 'RepeatedBlanks', 'LowContrast')
+$hasFixable = $false
+foreach ($i in $issues) {
+    if ($fixableRuleNames -contains $i.RuleName) { $hasFixable = $true; break }
+}
+if (-not $hasFixable) { exit $originalExit }
+
+$fixedPath = [IO.Path]::ChangeExtension($FilePath, $null).TrimEnd('.') + '.fixed' + $ext
+try {
+    Copy-Item -LiteralPath $FilePath -Destination $fixedPath -Force
+} catch {
+    [Console]::Error.WriteLine("Failed to create fixed copy at '$fixedPath': $($_.Exception.Message)")
+    exit 2
+}
+
+$fixCounts = @{ MissingTableHeaders = 0; RepeatedBlanks = 0; LowContrast = 0 }
+$fixDoc = $null
+try {
+    try {
+        $fixDoc = [DocumentFormat.OpenXml.Packaging.WordprocessingDocument]::Open($fixedPath, $true)
+    } catch {
+        [Console]::Error.WriteLine("Failed to open fixed copy '$fixedPath' for editing: $($_.Exception.Message)")
+        exit 2
+    }
+
+    $main = $fixDoc.MainDocumentPart
+    $partsToFix = @()
+    if ($main) { $partsToFix += $main }
+    foreach ($hp in $main.HeaderParts) { $partsToFix += $hp }
+    foreach ($fp in $main.FooterParts) { $partsToFix += $fp }
+
+    foreach ($part in $partsToFix) {
+        $xdoc = Get-PartXDocument $part
+        if (-not $xdoc -or -not $xdoc.Root) { continue }
+
+        $fixCounts.MissingTableHeaders += (Repair-WordTableHeader  -Root $xdoc.Root)
+        $fixCounts.RepeatedBlanks      += (Repair-WordRepeatedBlank -Root $xdoc.Root)
+        $fixCounts.LowContrast         += (Repair-WordLowContrast   -Root $xdoc.Root)
+
+        Save-PartXDocument -Part $part -Document $xdoc
+    }
+} finally {
+    if ($fixDoc) {
+        try { $fixDoc.Dispose() } catch { Write-Verbose "Dispose failed: $($_.Exception.Message)" }
+    }
+}
+
+$fixSummaryParts = @()
+foreach ($k in $fixableRuleNames) {
+    if ($fixCounts[$k] -gt 0) { $fixSummaryParts += ('{0} ({1})' -f $k, $fixCounts[$k]) }
+}
+if ($fixSummaryParts.Count -eq 0) {
+    # Issues were reported but the autofix paths matched none of the actual
+    # OOXML state (e.g., theme-driven contrast, cross-w:t blank runs). Drop
+    # the empty .fixed file rather than leaving a misleading artifact.
+    Remove-Item -LiteralPath $fixedPath -Force -ErrorAction SilentlyContinue
+    exit $originalExit
+}
+
+Write-Output ("FIXED {0}: {1}" -f $fixedPath, ($fixSummaryParts -join ', '))
+
+# Re-run on the fixed file so the user sees its PASS/FAIL (and any residual
+# issues in detailed mode). Recursion is bounded: -Fix is intentionally not
+# forwarded, so this terminates.
+& $PSCommandPath -FilePath $fixedPath -Format $Format
+exit $LASTEXITCODE

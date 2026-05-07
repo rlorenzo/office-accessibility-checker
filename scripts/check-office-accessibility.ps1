@@ -17,6 +17,12 @@
     'text' (default) emits a single PASS/FAIL line per file. 'detailed' emits
     every issue found, one per line, followed by a PASS/FAIL summary per file.
 
+.PARAMETER Fix
+    Forwards to the per-format checker. Each fixable file is copied to
+    <basename>.fixed.<ext> and the deterministic structural remediations are
+    applied. Originals are never modified. In bulk mode, every input file is
+    independently fixed; the scan summary reflects post-fix exit codes.
+
 .OUTPUTS
     Exit codes (single-file mode, and worst-of in bulk mode):
       0  no errors found
@@ -33,7 +39,9 @@ param(
     [switch] $Recurse,
 
     [ValidateSet('text','detailed')]
-    [string] $Format = 'text'
+    [string] $Format = 'text',
+
+    [switch] $Fix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,17 +57,20 @@ $item = Get-Item -LiteralPath $Path
 if (-not $item.PSIsContainer) {
     $ext = [IO.Path]::GetExtension($item.FullName).ToLowerInvariant()
 
+    $childArgs = @{ FilePath = $item.FullName; Format = $Format }
+    if ($Fix) { $childArgs.Fix = $true }
+
     switch ($ext) {
         { $_ -in '.docx', '.docm' } {
-            & (Join-Path $PSScriptRoot 'check-docx-accessibility.ps1') -FilePath $item.FullName -Format $Format
+            & (Join-Path $PSScriptRoot 'check-docx-accessibility.ps1') @childArgs
             exit $LASTEXITCODE
         }
         { $_ -in '.xlsx', '.xlsm' } {
-            & (Join-Path $PSScriptRoot 'check-xlsx-accessibility.ps1') -FilePath $item.FullName -Format $Format
+            & (Join-Path $PSScriptRoot 'check-xlsx-accessibility.ps1') @childArgs
             exit $LASTEXITCODE
         }
         { $_ -in '.pptx', '.pptm' } {
-            & (Join-Path $PSScriptRoot 'check-pptx-accessibility.ps1') -FilePath $item.FullName -Format $Format
+            & (Join-Path $PSScriptRoot 'check-pptx-accessibility.ps1') @childArgs
             exit $LASTEXITCODE
         }
         { $_ -in '.doc', '.xls', '.ppt' } {
@@ -89,10 +100,14 @@ $allFiles = @(Get-ChildItem @gciParams)
 
 # Office creates ~$<name> lock files in the same folder while a document is
 # open. They share the .docx/.xlsx extension but are not real documents and
-# would error noisily; filter them out.
+# would error noisily; filter them out. Also skip *.fixed.* outputs from
+# previous -Fix runs so a re-scan doesn't treat them as new inputs (and a
+# re-fix doesn't produce *.fixed.fixed.*).
 $supported = @(
     $allFiles | Where-Object {
-        $_.Extension -match '^\.(docx|docm|xlsx|xlsm|pptx|pptm)$' -and $_.Name -notlike '~$*'
+        $_.Extension -match '^\.(docx|docm|xlsx|xlsm|pptx|pptm)$' `
+            -and $_.Name -notlike '~$*' `
+            -and $_.BaseName -notlike '*.fixed'
     }
 )
 $skipped = $allFiles.Count - $supported.Count
@@ -112,7 +127,11 @@ for ($i = 0; $i -lt $total; $i++) {
             -PercentComplete (($i / $total) * 100)
     }
 
-    & $PSCommandPath -Path $f.FullName -Format $Format
+    if ($Fix) {
+        & $PSCommandPath -Path $f.FullName -Format $Format -Fix
+    } else {
+        & $PSCommandPath -Path $f.FullName -Format $Format
+    }
     $exit = $LASTEXITCODE
 
     switch ($exit) {

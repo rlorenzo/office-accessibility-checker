@@ -6,10 +6,7 @@
 [![PowerShell 7+](https://img.shields.io/badge/PowerShell-7%2B-blue?logo=powershell)](https://learn.microsoft.com/en-us/powershell/)
 ![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue?logo=windows)
 
-CLI accessibility checker for Office Open XML documents (`.docx`/`.docm`, `.xlsx`/`.xlsm`, `.pptx`/`.pptm`). Checks Microsoft's published [Accessibility Checker rules][rules] directly against OOXML using the [Open XML SDK][sdk]. Headless. No Office install required.
-
-[rules]: https://support.microsoft.com/en-us/office/rules-for-the-accessibility-checker-651e08f2-0fc3-4e10-aaca-74b4a67101c1
-[sdk]: https://www.nuget.org/packages/documentformat.openxml
+A command-line tool that checks Word, Excel, and PowerPoint files for accessibility problems — the same kinds of issues Microsoft's built-in Accessibility Checker reports. No copy of Office required.
 
 ## Quick start
 
@@ -19,183 +16,135 @@ CLI accessibility checker for Office Open XML documents (`.docx`/`.docm`, `.xlsx
 # PASS path\to\file.docx
 ```
 
-The setup script downloads the Open XML SDK DLLs into `scripts\lib\` (gitignored). It is idempotent; re-runs are no-ops unless `-Force` is passed.
+The setup step is a one-time download. After that, run the checker on any `.docx`, `.xlsx`, `.pptx` file (macro-enabled `.docm`/`.xlsm`/`.pptm` work too).
 
-## Usage
+## Checking a file
 
-The `-Format` parameter selects the output mode:
-
-- `text` (default): a single PASS/FAIL line. On failure the line names the failing rules: `FAIL <path>: MissingAltText, MissingTableHeaders`.
-- `detailed`: every issue found, one tab-separated line each (`SEVERITY<TAB>RuleName<TAB>Description`), followed by the PASS/FAIL summary.
+By default you get a single line per file:
 
 ```powershell
-.\scripts\check-office-accessibility.ps1 path\to\file.xlsx -Format detailed
-# WARNING  MergedCells          Sheet "Sheet1" contains merged cells
-# TIP      DefaultTableName     Table name "Table1" matches the auto-assigned default
-# PASS path\to\file.xlsx
+.\scripts\check-office-accessibility.ps1 report.docx
+# FAIL report.docx: MissingAltText, MissingTableHeaders
 ```
 
-The dispatcher picks the right checker based on file extension. You can also call `check-docx-accessibility.ps1` or `check-xlsx-accessibility.ps1` directly with the same parameters.
-
-### Bulk scan
-
-Pass a directory instead of a file to scan many files in one invocation. Supported extensions (`.docx`, `.docm`, `.xlsx`, `.xlsm`, `.pptx`, `.pptm`) are picked up; everything else is silently skipped. Office lock files (`~$*`) are ignored.
+For the full list of issues, add `-Format detailed`:
 
 ```powershell
-.\scripts\check-office-accessibility.ps1 path\to\folder
-# PASS path\to\folder\report.docx
-# FAIL path\to\folder\budget.xlsx: MissingAltText
-# PASS path\to\folder\memo.docx
+.\scripts\check-office-accessibility.ps1 report.docx -Format detailed
+# ERROR    MissingAltText        Image "chart" has no alt text
+# WARNING  MergedTableCells      Table 1 contains merged cells
+# FAIL report.docx: MissingAltText
 ```
 
-Subdirectories are not descended into by default. Add `-Recurse` to walk the tree:
+Issues come in three categories: **ERROR** (likely blocks people with disabilities — causes `FAIL`), **WARNING** (hard to use), and **TIP** (room to improve). Only ERRORs cause the script to exit non-zero, so you can wire it into CI without warnings tripping a build.
+
+## Checking many files at once
+
+Pass a folder instead of a file. Subfolders are not searched unless you add `-Recurse`.
 
 ```powershell
-.\scripts\check-office-accessibility.ps1 path\to\folder -Recurse -Format detailed
+.\scripts\check-office-accessibility.ps1 path\to\folder -Recurse
+# PASS folder\report.docx
+# FAIL folder\budget.xlsx: MissingAltText
+# PASS folder\memo.docx
 ```
 
-A summary footer is written to **stderr** (`Scanned N files: X passed, Y failed, Z errors, W skipped`), so stdout stays clean for piping. A single corrupt or unreadable file does not halt the scan; it produces an `ERROR <path>` line on stdout and the scan continues. The aggregate exit code is the worst per-file exit (0 if all passed, 1 if any accessibility errors, 2 if any tool errors).
+A summary footer (`Scanned N files: X passed, …`) is written to standard error. A single corrupt file produces an `ERROR` line and the scan keeps going.
 
-## Severity levels
+## Fixing what it can
 
-Each rule has one of three severities (matching Microsoft's Accessibility Checker categories):
+Add `-Fix` and a sibling file named `<original>.fixed.<ext>` is written with safe, automatic repairs applied. **Your original file is never modified.**
 
-| Severity | Meaning | Affects exit code |
-|----------|---------|-------------------|
-| ERROR    | Content people with disabilities likely cannot understand. | Yes (exit 1). |
-| WARNING  | Content is hard to understand. | No. |
-| TIP      | Content is understandable but could be improved. | No. |
+```powershell
+.\scripts\check-office-accessibility.ps1 report.docx -Fix
+# FAIL report.docx: MissingTableHeaders, LowContrast
+# FIXED report.fixed.docx: MissingTableHeaders (2), LowContrast (5)
+# PASS report.fixed.docx
+```
 
-In text mode, only ERRORs cause `FAIL`. In detailed mode, every issue is listed regardless of severity.
+Only fixes that don't drastically change how the document looks are applied:
+
+| Format | Issue | What gets fixed |
+|---|---|---|
+| Word | Missing table headers | Marks the first row of each table as a header. |
+| Word | Repeated blanks | Replaces 3+ spaces with a tab (Microsoft's recommended remediation). |
+| Word, Excel, PowerPoint | Low contrast text | Nudges the text color to the closest shade that meets WCAG contrast — same hue, just a bit darker or lighter. |
+| Excel | Missing table headers | Re-enables the header row Excel disabled. |
+| Excel | Red-only negative numbers | Adds a leading `-` so negatives are also distinguishable for color-blind readers. |
+| PowerPoint | Missing table headers | Turns on the table's header-row option. |
+
+Things that need human judgement — writing alt text, naming a slide, picking a meaningful link label, unmerging cells — are not autofixed.
+
+## What it checks
+
+### Word
+| Severity | Issue | What it looks for |
+|---|---|---|
+| ERROR | Missing alt text | Images, charts, and shapes without alt text or a "decorative" mark. |
+| ERROR | Missing table headers | Tables whose first row isn't marked as a header. (Layout-only tables are exempt.) |
+| ERROR | Missing content control title | Form fields with no title set. |
+| ERROR | Document protected | File is password- or rights-protected. |
+| WARNING | Merged table cells | Tables with merged or nested cells. |
+| WARNING | Heading order skip | Heading levels jump (e.g. Heading 1 to Heading 3). |
+| WARNING | Floating object | Images that aren't inline with text. |
+| WARNING | Repeated blanks | Three or more spaces in a row (use tabs instead). |
+| WARNING | Low contrast | Text whose color contrast falls below WCAG thresholds. |
+| TIP | No heading styles | Document has no headings at all. |
+
+### Excel
+| Severity | Issue | What it looks for |
+|---|---|---|
+| ERROR | Missing alt text | Pictures, charts, shapes without alt text. |
+| ERROR | Missing table headers | Excel table with the header row disabled. |
+| ERROR | Red-only negative formatting | Number formats that show negatives in red but with no `-` or parentheses. |
+| ERROR | Document protected | Workbook is password- or rights-protected. |
+| WARNING | Merged cells | Sheets containing merged cells. |
+| WARNING | Default sheet tab name | Sheet still named "Sheet1", "Tabelle1", "Hoja1", etc. |
+| WARNING | Low contrast | Cells whose font/fill colors fall below 4.5:1 contrast. |
+| TIP | Default table name | Table still named "Table1", "Table2", … |
+
+### PowerPoint
+| Severity | Issue | What it looks for |
+|---|---|---|
+| ERROR | Missing alt text | Images, charts, shapes without alt text. (Tables are exempt.) |
+| ERROR | Missing slide title | Slide has no title or a blank title. |
+| ERROR | Missing table headers | Table without a header row enabled. |
+| ERROR | Document protected | File is password- or rights-protected. |
+| WARNING | Duplicate slide title | Two or more slides share the same title. |
+| WARNING | Merged table cells | Tables with merged cells. |
+| WARNING | Low contrast | Text whose color contrast falls below 4.5:1. |
+| WARNING | Non-descriptive link text | Hyperlinks that read "click here", "more", the URL itself, etc. |
+
+For exact behavior — including OOXML-level details, intentional exemptions, and best-effort caveats — see [`docs/RULES.md`](docs/RULES.md). Microsoft's full rule reference lives [here][rules].
+
+## A few things to know
+
+- **Contrast checking is best-effort.** It only catches problems where both colors are explicitly set. Theme colors and inherited styles are skipped.
+- **Macro-enabled files** (`.docm`/`.xlsm`/`.pptm`) work the same way as their non-macro versions.
+- **Legacy `.doc`/`.xls`/`.ppt` files are not supported** — re-save them as the modern format first.
 
 ## Exit codes
 
 | Code | Meaning |
-|------|---------|
-| 0    | No accessibility errors. Warnings and tips do not fail. |
-| 1    | One or more accessibility errors found. Includes IRM/password-protected files. |
-| 2    | Tool error (file not found, unsupported format, SDK missing, file locked). |
-
-## Supported formats
-
-| Extension | Handled by |
-|-----------|------------|
-| `.docx`, `.docm` | `check-docx-accessibility.ps1` |
-| `.xlsx`, `.xlsm` | `check-xlsx-accessibility.ps1` |
-| `.pptx`, `.pptm` | `check-pptx-accessibility.ps1` |
-| `.doc`, `.xls`, `.ppt` | **Not supported.** Legacy binary formats; re-save as `.docx`/`.xlsx`/`.pptx`. Exits 2. |
-
-## Rules implemented
-
-### Word
-
-| Severity | Rule | What it checks |
-|----------|------|----------------|
-| ERROR    | `MissingAltText` | Every drawing in body, headers, footers, and groups has alt text, a title, or `decorative="1"`. |
-| ERROR    | `MissingTableHeaders` | First row carries `w:trPr/w:tblHeader` (the semantic table-header marker). Visual first-row styling via `tblLook` is intentionally **not** accepted, since accepting it would let tables that look like they have headers pass while exposing nothing to screen readers. Tables marked as layout-only via `w:tblPr/w:tblDescription` are exempt. |
-| ERROR    | `MissingContentControlTitle` | Every `w:sdt` has a non-empty `w:alias`. |
-| ERROR    | `DocumentProtected` | File is IRM- or password-protected (Restrict Editing is **not** flagged). |
-| WARNING  | `MergedTableCells` | Tables with merged or nested cells. |
-| WARNING  | `HeadingOrderSkip` | Heading levels skip (e.g., Heading1 to Heading3). |
-| WARNING  | `FloatingObject` | Drawings using `wp:anchor` (not inline). |
-| WARNING  | `RepeatedBlanks` | 3+ consecutive spaces or non-breaking spaces. Tabs are intentionally **not** flagged (Microsoft's own remediation advice is to use tabs). |
-| WARNING  | `LowContrast` | Best-effort. Flags runs whose foreground (`w:rPr/w:color`) and background (run or paragraph `w:shd/@w:fill`) are both explicit hex values and whose WCAG contrast ratio falls below 4.5:1 (3:1 for 18pt+ text or 14pt+ bold). Theme references, "auto" colors, and style/theme inheritance are skipped. |
-| TIP      | `NoHeadingStyles` | Document has no Heading-style paragraphs anywhere. |
-
-### Excel
-
-| Severity | Rule | What it checks |
-|----------|------|----------------|
-| ERROR    | `MissingAltText` | Every drawing (pictures, charts, shapes, group shapes) across all anchor types has alt text, a title, or `decorative="1"`. |
-| ERROR    | `MissingTableHeaders` | `<table>` does not have `headerRowCount="0"`. |
-| ERROR    | `RedOnlyNegativeFormatting` | Best-effort detection of `[Red]` numFmt patterns lacking complementary minus/parens. |
-| ERROR    | `DocumentProtected` | Workbook is IRM- or password-protected (workbook/sheet protection is **not** flagged). |
-| WARNING  | `MergedCells` | Worksheet has any `<mergeCells>` entries (sheet-wide check, not table-scoped). |
-| WARNING  | `DefaultSheetTabName` | Sheet tab matches a default placeholder (`Sheet1`, `Tabelle1`, `Feuil1`, `Hoja1`, `Foglio1`, `Planilha1`, `シート1`, etc.). Add locales by editing the regex array at the top of the script. |
-| WARNING  | `LowContrast` | Best-effort. Flags cells whose font color and cell fill are both explicit RGB values and whose WCAG contrast ratio falls below 4.5:1. Theme references, indexed-palette colors, "auto", non-solid fills, and conditional formatting are skipped. |
-| TIP      | `DefaultTableName` | Table name matches `^Table\d+$`. |
-
-### PowerPoint
-
-| Severity | Rule | What it checks |
-|----------|------|----------------|
-| ERROR    | `MissingAltText` | Every non-placeholder shape, picture, chart/SmartArt graphic frame, connector, and group child has alt text, a title, or `decorative="1"`. Tables (graphic frames containing `a:tbl`) are exempt because their cells already expose accessible text. |
-| ERROR    | `MissingSlideTitle` | Every slide has a title placeholder (`p:ph/@type` ∈ {`title`, `ctrTitle`}) with non-empty text. Triggers both for slides with no title placeholder and for slides whose placeholder text is blank. |
-| ERROR    | `MissingTableHeaders` | Every `a:tbl` has `a:tblPr/@firstRow="1"` (the table-style header-row marker). |
-| ERROR    | `DocumentProtected` | File is IRM- or password-protected. |
-| WARNING  | `DuplicateSlideTitle` | Two or more slides share the same title text (case-insensitive, trimmed). |
-| WARNING  | `MergedTableCells` | Tables with cells using `gridSpan>1`, `rowSpan>1`, `hMerge="1"`, or `vMerge="1"`. |
-| WARNING  | `LowContrast` | Best-effort. Flags runs whose foreground (`a:rPr/a:solidFill/a:srgbClr`) and background (owning shape's `p:spPr` solid fill, falling back to the slide's `p:cSld/p:bg` solid fill) are both explicit RGB and whose WCAG contrast ratio falls below 4.5:1. Theme/scheme colors, gradients, and inherited fills are skipped. |
-| WARNING  | `NonDescriptiveLinkText` | Run-level hyperlinks (`a:rPr/a:hlinkClick`) whose visible text is empty, equals the URL, or matches a generic phrase such as `click here`, `here`, `more`, `read more`, `link`, `this link`. |
-
-## Known limitations
-
-- **Contrast.** Best-effort only (`LowContrast` rule). The check requires both foreground and background to be explicit RGB values; runs/cells whose colors come from theme references, "auto", indexed palettes, style inheritance, or conditional formatting are skipped because resolving them faithfully requires rendering. Expect false negatives for documents that rely on themed colors.
-- **Red-only number format.** Detection is best-effort against common `[Red]` patterns. Custom numFmt edge cases may slip through.
-- **Localized default sheet names.** The locale list lives in `check-xlsx-accessibility.ps1` as a single named constant; add a regex to extend.
-- **Macro-enabled formats** (`.docm`, `.xlsm`) are treated identically to their non-macro siblings, since macros are irrelevant to OOXML structural checks.
+|---|---|
+| 0 | No errors found. |
+| 1 | One or more accessibility errors. |
+| 2 | Tool error (file missing, unsupported format, etc.). |
 
 ## Development
 
-### Running tests
-
-A manifest-driven Pester suite lives under [scripts/tests/](scripts/tests/). It runs each checker against committed accessible/inaccessible Word, Excel, and PowerPoint fixtures and asserts that the exit code and reported rules match [manifest.psd1](scripts/tests/fixtures/manifest.psd1).
-
 ```powershell
-# Idempotent: fetches the Open XML SDK + Pester 5 if missing, then runs the suite.
-.\scripts\tests\Invoke-Tests.ps1
-
-# Or, if you have already installed Pester 5+ yourself:
-Invoke-Pester scripts\tests
+.\scripts\tests\Invoke-Tests.ps1   # run the test suite
+.\scripts\lint.ps1                  # run the linter
 ```
 
-Fixtures are committed binaries under [scripts/tests/fixtures/](scripts/tests/fixtures/), produced by [Build-Fixtures.ps1](scripts/tests/Build-Fixtures.ps1). See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow when changing rules or regenerating fixtures.
+Tests and fixtures live under [`scripts/tests/`](scripts/tests/). The technical rule catalog and autofix design notes are in [`docs/RULES.md`](docs/RULES.md). See [CONTRIBUTING.md](CONTRIBUTING.md) for the developer workflow.
 
-The `DocumentProtected` rule has no fixture: it fires when the package is wrapped in an encrypted Compound File envelope, which the SDK does not write. Coverage is intentionally deferred. To exercise it, hand-craft a password-encrypted file and add a manifest entry.
-
-CI runs the lint and test jobs on every push and pull request via [.github/workflows/ci.yml](.github/workflows/ci.yml).
-
-### Linting
-
-```powershell
-.\scripts\lint.ps1
-```
-
-Runs PSScriptAnalyzer against `scripts\` using the rules in [PSScriptAnalyzerSettings.psd1](PSScriptAnalyzerSettings.psd1). Exits non-zero on findings at severity >= Warning, so it is safe to wire into pre-commit hooks. CI runs the same script.
-
-### Overriding the SDK location
-
-```powershell
-$env:OPENXML_SDK_PATH = 'C:\path\to\DocumentFormat.OpenXml.dll'
-```
-
-If set and the file exists, this takes precedence over the bundled `scripts\lib\` copy.
-
-### Project layout
-
-```
-scripts/
-  setup-accessibility-checker.ps1   # one-time SDK download
-  check-office-accessibility.ps1    # dispatcher (.docx / .xlsx / .pptx -> right checker)
-  check-docx-accessibility.ps1      # Word rules
-  check-xlsx-accessibility.ps1      # Excel rules
-  check-pptx-accessibility.ps1      # PowerPoint rules
-  lint.ps1                          # PSScriptAnalyzer wrapper
-  lib/                              # gitignored; populated by setup script
-  tests/
-    AccessibilityChecker.Tests.ps1  # manifest-driven Pester suite
-    Build-Fixtures.ps1              # one-shot regenerator (run when rules change)
-    Invoke-Tests.ps1                # local convenience wrapper
-    fixtures/
-      manifest.psd1                 # filename -> expected exit + rule names
-      *.docx, *.xlsx, *.pptx        # committed; rebuild via Build-Fixtures.ps1
-.github/workflows/ci.yml            # lint + test on windows-latest
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). For security issues, see [SECURITY.md](SECURITY.md).
+To use a different copy of the Open XML SDK, set `$env:OPENXML_SDK_PATH`.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Security disclosures: [SECURITY.md](SECURITY.md).
+
+[rules]: https://support.microsoft.com/en-us/office/rules-for-the-accessibility-checker-651e08f2-0fc3-4e10-aaca-74b4a67101c1
+[sdk]: https://www.nuget.org/packages/documentformat.openxml

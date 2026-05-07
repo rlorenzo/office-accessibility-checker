@@ -31,11 +31,20 @@
     'detailed' emits every issue (one tab-separated line) followed by the
     PASS/FAIL summary line.
 
+.PARAMETER Fix
+    When set, after running the checks the script writes a sibling file named
+    <basename>.fixed.pptx (or .pptm) with deterministic structural remediations
+    applied for the rules MissingTableHeaders and LowContrast. The original
+    file is never modified.
+
 .OUTPUTS
     Exit codes:
       0  no errors found (warnings do not fail)
       1  one or more accessibility errors found (includes IRM/password-protected)
       2  tool error (file not found, unsupported format, SDK load failure, file locked)
+
+      With -Fix, the exit code reflects the FIXED file when fixes were applied,
+      otherwise the original file.
 #>
 
 [CmdletBinding()]
@@ -44,7 +53,9 @@ param(
     [string] $FilePath,
 
     [ValidateSet('text','detailed')]
-    [string] $Format = 'text'
+    [string] $Format = 'text',
+
+    [switch] $Fix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -672,6 +683,163 @@ function Test-LowContrast {
 }
 
 #--------------------------------------------------------------------
+# Autofix helpers
+#--------------------------------------------------------------------
+
+function ConvertTo-Hsl {
+    param([Parameter(Mandatory)] [string] $Hex)
+    $r = [Convert]::ToInt32($Hex.Substring(0, 2), 16) / 255.0
+    $g = [Convert]::ToInt32($Hex.Substring(2, 2), 16) / 255.0
+    $b = [Convert]::ToInt32($Hex.Substring(4, 2), 16) / 255.0
+    $max = [Math]::Max([Math]::Max($r, $g), $b)
+    $min = [Math]::Min([Math]::Min($r, $g), $b)
+    $L = ($max + $min) / 2.0
+    if ($max -eq $min) { return [pscustomobject]@{ H = 0.0; S = 0.0; L = $L } }
+    $d = $max - $min
+    $S = if ($L -gt 0.5) { $d / (2.0 - $max - $min) } else { $d / ($max + $min) }
+    $H = 0.0
+    if     ($max -eq $r) { $H = (($g - $b) / $d) + ($(if ($g -lt $b) { 6.0 } else { 0.0 })) }
+    elseif ($max -eq $g) { $H = (($b - $r) / $d) + 2.0 }
+    else                 { $H = (($r - $g) / $d) + 4.0 }
+    return [pscustomobject]@{ H = ($H / 6.0); S = $S; L = $L }
+}
+
+function Get-HueChannel {
+    param([double] $p, [double] $q, [double] $t)
+    if ($t -lt 0) { $t += 1 }
+    if ($t -gt 1) { $t -= 1 }
+    if ($t -lt (1.0 / 6.0)) { return $p + ($q - $p) * 6.0 * $t }
+    if ($t -lt 0.5) { return $q }
+    if ($t -lt (2.0 / 3.0)) { return $p + ($q - $p) * ((2.0 / 3.0) - $t) * 6.0 }
+    return $p
+}
+
+function ConvertFrom-Hsl {
+    param([Parameter(Mandatory)] [double] $H,
+          [Parameter(Mandatory)] [double] $S,
+          [Parameter(Mandatory)] [double] $L)
+    if ($S -eq 0) { $r = $L; $g = $L; $b = $L }
+    else {
+        $q = if ($L -lt 0.5) { $L * (1.0 + $S) } else { $L + $S - ($L * $S) }
+        $p = (2.0 * $L) - $q
+        $r = Get-HueChannel $p $q ($H + (1.0 / 3.0))
+        $g = Get-HueChannel $p $q $H
+        $b = Get-HueChannel $p $q ($H - (1.0 / 3.0))
+    }
+    $rByte = [int][Math]::Round($r * 255)
+    $gByte = [int][Math]::Round($g * 255)
+    $bByte = [int][Math]::Round($b * 255)
+    return ('{0:X2}{1:X2}{2:X2}' -f $rByte, $gByte, $bByte)
+}
+
+function Get-NearestPassingForeground {
+    param(
+        [Parameter(Mandatory)] [string] $ForegroundHex,
+        [Parameter(Mandatory)] [string] $BackgroundHex,
+        [double] $Threshold = 4.5
+    )
+    if ((Get-ContrastRatio -ForegroundHex $ForegroundHex -BackgroundHex $BackgroundHex) -ge $Threshold) {
+        return $ForegroundHex
+    }
+    $hsl = ConvertTo-Hsl -Hex $ForegroundHex
+    $step = 0.005
+    $bestDark = $null; $deltaDark = [double]::PositiveInfinity
+    for ($L = $hsl.L - $step; $L -ge 0; $L -= $step) {
+        $cand = ConvertFrom-Hsl -H $hsl.H -S $hsl.S -L $L
+        if ((Get-ContrastRatio -ForegroundHex $cand -BackgroundHex $BackgroundHex) -ge $Threshold) {
+            $bestDark = $cand; $deltaDark = $hsl.L - $L; break
+        }
+    }
+    $bestLight = $null; $deltaLight = [double]::PositiveInfinity
+    for ($L = $hsl.L + $step; $L -le 1; $L += $step) {
+        $cand = ConvertFrom-Hsl -H $hsl.H -S $hsl.S -L $L
+        if ((Get-ContrastRatio -ForegroundHex $cand -BackgroundHex $BackgroundHex) -ge $Threshold) {
+            $bestLight = $cand; $deltaLight = $L - $hsl.L; break
+        }
+    }
+    if ($bestDark -and $deltaDark -le $deltaLight) { return $bestDark }
+    if ($bestLight) { return $bestLight }
+    $blackR = Get-ContrastRatio -ForegroundHex '000000' -BackgroundHex $BackgroundHex
+    $whiteR = Get-ContrastRatio -ForegroundHex 'FFFFFF' -BackgroundHex $BackgroundHex
+    if ($blackR -ge $whiteR) { return '000000' } else { return 'FFFFFF' }
+}
+
+# Set a:tblPr/@firstRow="1" on every a:tbl missing it. Counts the tables
+# fixed across the slide.
+function Repair-PptxTableHeader {
+    param([System.Xml.Linq.XElement] $SpTree)
+    if ($null -eq $SpTree) { return 0 }
+    $fixed = 0
+    foreach ($tbl in (Get-Descendant -Root $SpTree -Namespace $NS.a -LocalName 'tbl')) {
+        $tblPr = Get-ChildElement -Parent $tbl -Namespace $NS.a -LocalName 'tblPr'
+        if (-not $tblPr) {
+            # a:tblPr must precede a:tblGrid per the schema.
+            $tblPr = New-Object System.Xml.Linq.XElement -ArgumentList ([System.Xml.Linq.XName]::Get('tblPr', $NS.a))
+            $tbl.AddFirst($tblPr)
+        }
+        $firstRow = Get-XAttr -Element $tblPr -Namespace $null -LocalName 'firstRow'
+        if ($firstRow -eq '1' -or $firstRow -eq 'true') { continue }
+        $tblPr.SetAttributeValue([System.Xml.Linq.XName]::Get('firstRow'), '1')
+        $fixed++
+    }
+    return $fixed
+}
+
+# For each leaf shape in the slide, walk its runs and rewrite the foreground
+# color of any run whose contrast against the resolved background falls below
+# 4.5:1. Background resolution mirrors the rule: shape solid fill, falling
+# back to slide background. Returns count of runs rewritten.
+function Repair-PptxLowContrast {
+    param(
+        [System.Xml.Linq.XElement] $CSld,
+        [System.Xml.Linq.XElement] $SpTree
+    )
+    if ($null -eq $SpTree) { return 0 }
+    $fixed = 0
+    $slideBg = Get-SlideBackgroundHex -CSld $CSld
+
+    foreach ($shape in (Get-LeafShape -SpTree $SpTree)) {
+        if ($shape.Name.LocalName -ne 'sp') { continue }
+        $spPr = Get-ChildElement -Parent $shape -Namespace $NS.p -LocalName 'spPr'
+        $shapeFill = Get-ExplicitSolidFillHex -Container $spPr
+        $bg = if ($shapeFill) { $shapeFill } else { $slideBg }
+        if (-not $bg) { continue }
+
+        $txBody = Get-ChildElement -Parent $shape -Namespace $NS.p -LocalName 'txBody'
+        if ($null -eq $txBody) { continue }
+
+        foreach ($run in (Get-Descendant -Root $txBody -Namespace $NS.a -LocalName 'r')) {
+            $rPr = Get-ChildElement -Parent $run -Namespace $NS.a -LocalName 'rPr'
+            if ($null -eq $rPr) { continue }
+            $solidFill = Get-ChildElement -Parent $rPr -Namespace $NS.a -LocalName 'solidFill'
+            if ($null -eq $solidFill) { continue }
+            $srgb = Get-ChildElement -Parent $solidFill -Namespace $NS.a -LocalName 'srgbClr'
+            if ($null -eq $srgb) { continue }
+            $fgVal = Get-XAttr -Element $srgb -Namespace $null -LocalName 'val'
+            if (-not $fgVal -or $fgVal -notmatch '^[0-9A-Fa-f]{6}$') { continue }
+
+            if ((Get-ContrastRatio -ForegroundHex $fgVal -BackgroundHex $bg) -ge 4.5) { continue }
+
+            $newFg = Get-NearestPassingForeground -ForegroundHex $fgVal -BackgroundHex $bg -Threshold 4.5
+            if (-not $newFg -or $newFg -eq $fgVal.ToUpper()) { continue }
+            $srgb.SetAttributeValue([System.Xml.Linq.XName]::Get('val'), $newFg)
+            $fixed++
+        }
+    }
+    return $fixed
+}
+
+function Save-PartXDocument {
+    param($Part, [System.Xml.Linq.XDocument] $Document)
+    $stream = $Part.GetStream([IO.FileMode]::Create, [IO.FileAccess]::Write)
+    try {
+        $Document.Save($stream)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+#--------------------------------------------------------------------
 # Main: open document and run all rules
 #--------------------------------------------------------------------
 
@@ -788,4 +956,73 @@ else {
     Write-Output $summary
 }
 
-exit $exitCode
+#--------------------------------------------------------------------
+# Autofix
+#--------------------------------------------------------------------
+
+if (-not $Fix) { exit $exitCode }
+
+$fixableRuleNames = @('MissingTableHeaders', 'LowContrast')
+$hasFixable = $false
+foreach ($i in $issues) {
+    if ($fixableRuleNames -contains $i.RuleName) { $hasFixable = $true; break }
+}
+if (-not $hasFixable) { exit $exitCode }
+
+$fixedPath = [IO.Path]::ChangeExtension($FilePath, $null).TrimEnd('.') + '.fixed' + $ext
+try {
+    Copy-Item -LiteralPath $FilePath -Destination $fixedPath -Force
+}
+catch {
+    [Console]::Error.WriteLine("Failed to create fixed copy at '$fixedPath': $($_.Exception.Message)")
+    exit 2
+}
+
+$fixCounts = @{ MissingTableHeaders = 0; LowContrast = 0 }
+$fixDoc = $null
+try {
+    try {
+        $fixDoc = [DocumentFormat.OpenXml.Packaging.PresentationDocument]::Open($fixedPath, $true)
+    } catch {
+        [Console]::Error.WriteLine("Failed to open fixed copy '$fixedPath' for editing: $($_.Exception.Message)")
+        exit 2
+    }
+
+    $presPartFix = $fixDoc.PresentationPart
+    if ($null -ne $presPartFix) {
+        foreach ($entry in (Get-OrderedSlideList -PresentationPart $presPartFix)) {
+            $slidePart = $entry.SlidePart
+            $slideDoc = Get-PartXDocument -Part $slidePart
+            if ($null -eq $slideDoc -or $null -eq $slideDoc.Root) { continue }
+            $cSld = Get-ChildElement -Parent $slideDoc.Root -Namespace $NS.p -LocalName 'cSld'
+            $spTree = if ($cSld) { Get-ChildElement -Parent $cSld -Namespace $NS.p -LocalName 'spTree' } else { $null }
+            if ($null -eq $spTree) { continue }
+
+            $tCount  = Repair-PptxTableHeader -SpTree $spTree
+            $cCount  = Repair-PptxLowContrast -CSld $cSld -SpTree $spTree
+            $fixCounts.MissingTableHeaders += $tCount
+            $fixCounts.LowContrast         += $cCount
+
+            if (($tCount + $cCount) -gt 0) { Save-PartXDocument -Part $slidePart -Document $slideDoc }
+        }
+    }
+}
+finally {
+    if ($null -ne $fixDoc) {
+        try { $fixDoc.Dispose() } catch { Write-Verbose "Dispose failed: $($_.Exception.Message)" }
+    }
+}
+
+$fixSummaryParts = @()
+foreach ($k in $fixableRuleNames) {
+    if ($fixCounts[$k] -gt 0) { $fixSummaryParts += ('{0} ({1})' -f $k, $fixCounts[$k]) }
+}
+if ($fixSummaryParts.Count -eq 0) {
+    Remove-Item -LiteralPath $fixedPath -Force -ErrorAction SilentlyContinue
+    exit $exitCode
+}
+
+Write-Output ("FIXED {0}: {1}" -f $fixedPath, ($fixSummaryParts -join ', '))
+
+& $PSCommandPath -FilePath $fixedPath -Format $Format
+exit $LASTEXITCODE
