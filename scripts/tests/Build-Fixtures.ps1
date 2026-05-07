@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     One-shot regenerator for the .docx/.xlsx fixtures the Pester suite reads.
 
@@ -715,6 +715,402 @@ function Build-XlsxLowContrast {
     }
 }
 
+# --- PowerPoint XML fragments ----------------------------------------------
+#
+# PowerPoint fixtures use a deliberately minimal package: presentation.xml
+# referencing one or more slides, plus per-slide XML. The checker walks slides
+# directly from the presentation's sldIdLst and never visits the layout/master
+# chain, so the fixtures omit those parts.
+
+$PptxNs = @{
+    p = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+    a = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    r = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+}
+
+$PptxSlideAttrs = @"
+xmlns:p="$($PptxNs.p)" xmlns:a="$($PptxNs.a)" xmlns:r="$($PptxNs.r)"
+"@
+
+# Build a presentation.xml referencing the supplied slide relationship IDs in
+# order. Slides display in the order their <p:sldId> entries appear here.
+function Get-PptxPresentationXml {
+    param([string[]] $SlideRelIds)
+    $sldId = 256
+    $entries = foreach ($rid in $SlideRelIds) {
+        "    <p:sldId id=`"$sldId`" r:id=`"$rid`"/>"
+        $sldId++
+    }
+    $sldList = ($entries -join "`n")
+    @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation $PptxSlideAttrs>
+  <p:sldIdLst>
+$sldList
+  </p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000"/>
+  <p:notesSz cx="6858000" cy="9144000"/>
+</p:presentation>
+"@
+}
+
+# Wrap a spTree body in the slide envelope.
+function Get-PptxSlideXml {
+    param([string] $SpTreeChildren)
+    @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld $PptxSlideAttrs>
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr/>
+$SpTreeChildren
+    </p:spTree>
+  </p:cSld>
+</p:sld>
+"@
+}
+
+# Slide envelope with an explicit white background — used by the LowContrast
+# fixture so the contrast lookup has a known background to read.
+function Get-PptxSlideXmlWhiteBackground {
+    param([string] $SpTreeChildren)
+    @"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld $PptxSlideAttrs>
+  <p:cSld>
+    <p:bg>
+      <p:bgPr>
+        <a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
+      </p:bgPr>
+    </p:bg>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr/>
+$SpTreeChildren
+    </p:spTree>
+  </p:cSld>
+</p:sld>
+"@
+}
+
+# Title placeholder shape. $Text = '' means PowerPoint would render the
+# layout's "Click to add title" prompt; the checker treats that as missing.
+function Get-PptxTitleShape {
+    param([int] $Id = 2, [string] $Text = '')
+    $body = if ([string]::IsNullOrEmpty($Text)) {
+        '<a:p><a:endParaRPr lang="en-US"/></a:p>'
+    } else {
+        "<a:p><a:r><a:rPr lang=`"en-US`"/><a:t>$Text</a:t></a:r></a:p>"
+    }
+    @"
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="$Id" name="Title $Id"/>
+          <p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>
+          <p:nvPr><p:ph type="title"/></p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          $body
+        </p:txBody>
+      </p:sp>
+"@
+}
+
+# Picture shape. $Descr controls the alt text on cNvPr; $ExtLstDecorative
+# instead embeds the modern Office <adec:decorative val="1"/> extLst marker
+# (omitting descr) — used to test the alt-text rule's recognition of the
+# Office 2019/365 "Mark as Decorative" form.
+function Get-PptxPictureShape {
+    param(
+        [int] $Id = 3,
+        [string] $Name = "Picture $Id",
+        [string] $Descr = '',
+        [bool] $ExtLstDecorative = $false
+    )
+    $descrAttr = if ($Descr) { " descr=`"$Descr`"" } else { '' }
+    $extLst = if ($ExtLstDecorative) {
+        '<a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext></a:extLst>'
+    } else { '' }
+    @"
+      <p:pic>
+        <p:nvPicPr>
+          <p:cNvPr id="$Id" name="$Name"$descrAttr>$extLst</p:cNvPr>
+          <p:cNvPicPr/>
+          <p:nvPr/>
+        </p:nvPicPr>
+        <p:blipFill><a:blip/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+        <p:spPr/>
+      </p:pic>
+"@
+}
+
+# Two-column, two-row table inside a graphicFrame. $FirstRow controls the
+# tblPr/@firstRow attribute. $Merge produces a horizontally-merged first row.
+function Get-PptxTableShape {
+    param(
+        [int] $Id = 4,
+        [bool] $FirstRow = $true,
+        [bool] $Merge = $false
+    )
+    $firstAttr = if ($FirstRow) { ' firstRow="1"' } else { '' }
+    $mergeAttrs = if ($Merge) { ' gridSpan="2"' } else { '' }
+    $cellB = if ($Merge) { '' }
+             else        { '<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>B</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>' }
+    @"
+      <p:graphicFrame>
+        <p:nvGraphicFramePr>
+          <p:cNvPr id="$Id" name="Table $Id"/>
+          <p:cNvGraphicFramePr/>
+          <p:nvPr/>
+        </p:nvGraphicFramePr>
+        <p:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="2000000"/></p:xfrm>
+        <a:graphic>
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+            <a:tbl>
+              <a:tblPr$firstAttr/>
+              <a:tblGrid><a:gridCol w="3000000"/><a:gridCol w="3000000"/></a:tblGrid>
+              <a:tr h="500000">
+                <a:tc$mergeAttrs><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>A</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>
+                $cellB
+              </a:tr>
+              <a:tr h="500000">
+                <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>
+                <a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>2</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>
+              </a:tr>
+            </a:tbl>
+          </a:graphicData>
+        </a:graphic>
+      </p:graphicFrame>
+"@
+}
+
+# Body text shape carrying a single hyperlink run. $RelId references a
+# hyperlink relationship the caller is responsible for adding to the slide
+# part. $Text is the visible text of the linked run.
+function Get-PptxLinkShape {
+    param(
+        [int] $Id = 5,
+        [string] $RelId = 'rIdLink1',
+        [string] $Text = 'Annual report'
+    )
+    @"
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="$Id" name="Body $Id"/>
+          <p:cNvSpPr/>
+          <p:nvPr><p:ph idx="1"/></p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US"><a:hlinkClick r:id="$RelId"/></a:rPr>
+              <a:t>$Text</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+"@
+}
+
+# Shape with explicit white fill and a single text run colored grey (CCCCCC).
+# Computed contrast with white is ~1.61:1, well below the 4.5:1 threshold.
+# Marked decorative so the alt-text rule does not co-fire.
+function Get-PptxLowContrastShape {
+    param([int] $Id = 6, [string] $Text = 'Hard to read')
+    @"
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="$Id" name="Tile $Id" decorative="1"/>
+          <p:cNvSpPr/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="800000"/></a:xfrm>
+          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+          <a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US">
+                <a:solidFill><a:srgbClr val="CCCCCC"/></a:solidFill>
+              </a:rPr>
+              <a:t>$Text</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+"@
+}
+
+# Compose a PowerPoint fixture. $SlideEnvelopes is a list of full <p:sld> XML
+# strings (one per slide). $LinkRels (optional) attaches hyperlink
+# relationships per slide, indexed by 0-based slide position; each entry is a
+# hashtable of @{ RelId = Url }.
+#
+# IMPORTANT — fixture realism scope:
+#
+#   These fixtures are deliberately minimal SDK-only packages. They include a
+#   PresentationPart and one or more SlidePart(s) but DO NOT include the
+#   SlideMaster / SlideLayout / Theme parts that a real PowerPoint file
+#   requires. The dispatcher and checker open them via
+#   `PresentationDocument.Open` and walk only what the rules need (slide
+#   spTree contents and hyperlink relationships), so the missing parts have
+#   no behavioural impact on tests.
+#
+#   Microsoft PowerPoint itself, however, will refuse to open these fixtures
+#   ("PowerPoint found a problem with content"). If you want a fixture you
+#   can manually inspect in PowerPoint to verify a checker change against
+#   the native Accessibility Checker, build it in PowerPoint and copy it
+#   into scripts/tests/fixtures/ rather than threading a full
+#   master/layout/theme skeleton through this builder.
+function Build-PptxFixture {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Fixture builder mirrors slide-collection input.')]
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string[]] $SlideEnvelopes,
+        [object[]] $LinkRels = $null
+    )
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+    $type = [DocumentFormat.OpenXml.PresentationDocumentType]::Presentation
+    $doc = [DocumentFormat.OpenXml.Packaging.PresentationDocument]::Create($Path, $type)
+    try {
+        $presPart = $doc.AddPresentationPart()
+
+        $relIds = @()
+        for ($i = 0; $i -lt $SlideEnvelopes.Count; $i++) {
+            $rid = "rIdSlide{0}" -f ($i + 1)
+            $relIds += $rid
+            $slidePart = Add-OpenXmlPart -Container $presPart -PartType ([DocumentFormat.OpenXml.Packaging.SlidePart]) -RelId $rid
+
+            Set-PartXml -Part $slidePart -Xml $SlideEnvelopes[$i]
+
+            if ($LinkRels -and $i -lt $LinkRels.Count -and $LinkRels[$i]) {
+                foreach ($entry in $LinkRels[$i].GetEnumerator()) {
+                    [void] $slidePart.AddHyperlinkRelationship([uri] $entry.Value, $true, $entry.Key)
+                }
+            }
+        }
+
+        Set-PartXml -Part $presPart -Xml (Get-PptxPresentationXml -SlideRelIds $relIds)
+    } finally {
+        $doc.Dispose()
+    }
+}
+
+# --- PowerPoint fixture builders -------------------------------------------
+
+function Build-PptxAccessibleBaseline {
+    param([string] $Path)
+    $sp = @(
+        Get-PptxTitleShape   -Id 2 -Text 'Welcome'
+        Get-PptxPictureShape -Id 3 -Descr 'Company logo'
+        Get-PptxTableShape   -Id 4 -FirstRow $true
+        Get-PptxLinkShape    -Id 5 -RelId 'rIdLink1' -Text 'Annual report'
+    ) -join "`n"
+    Build-PptxFixture -Path $Path `
+        -SlideEnvelopes @((Get-PptxSlideXml -SpTreeChildren $sp)) `
+        -LinkRels @(@{ 'rIdLink1' = 'https://example.com/annual-report' })
+}
+
+function Build-PptxMissingSlideTitle {
+    param([string] $Path)
+    # Title placeholder present but empty text — checker reports
+    # "empty title" rather than "no title placeholder".
+    $sp = (Get-PptxTitleShape -Id 2 -Text '')
+    Build-PptxFixture -Path $Path -SlideEnvelopes @((Get-PptxSlideXml -SpTreeChildren $sp))
+}
+
+function Build-PptxMissingAltText {
+    param([string] $Path)
+    $sp = @(
+        Get-PptxTitleShape   -Id 2 -Text 'Welcome'
+        Get-PptxPictureShape -Id 3 -Descr ''
+    ) -join "`n"
+    Build-PptxFixture -Path $Path -SlideEnvelopes @((Get-PptxSlideXml -SpTreeChildren $sp))
+}
+
+function Build-PptxMissingTableHeaders {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Fixture function name mirrors the MissingTableHeaders rule which is intentionally plural.')]
+    param([string] $Path)
+    $sp = @(
+        Get-PptxTitleShape -Id 2 -Text 'Inventory'
+        Get-PptxTableShape -Id 4 -FirstRow $false
+    ) -join "`n"
+    Build-PptxFixture -Path $Path -SlideEnvelopes @((Get-PptxSlideXml -SpTreeChildren $sp))
+}
+
+function Build-PptxDuplicateSlideTitle {
+    param([string] $Path)
+    $envelopes = @(
+        Get-PptxSlideXml -SpTreeChildren (Get-PptxTitleShape -Id 2 -Text 'Overview')
+        Get-PptxSlideXml -SpTreeChildren (Get-PptxTitleShape -Id 2 -Text 'Details')
+        Get-PptxSlideXml -SpTreeChildren (Get-PptxTitleShape -Id 2 -Text 'Overview')
+    )
+    Build-PptxFixture -Path $Path -SlideEnvelopes $envelopes
+}
+
+function Build-PptxMergedTableCells {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Fixture function name mirrors the MergedTableCells rule which is intentionally plural.')]
+    param([string] $Path)
+    $sp = @(
+        Get-PptxTitleShape -Id 2 -Text 'Roster'
+        Get-PptxTableShape -Id 4 -FirstRow $true -Merge $true
+    ) -join "`n"
+    Build-PptxFixture -Path $Path -SlideEnvelopes @((Get-PptxSlideXml -SpTreeChildren $sp))
+}
+
+function Build-PptxNonDescriptiveLink {
+    param([string] $Path)
+    $sp = @(
+        Get-PptxTitleShape -Id 2 -Text 'Resources'
+        Get-PptxLinkShape  -Id 5 -RelId 'rIdLink1' -Text 'click here'
+    ) -join "`n"
+    Build-PptxFixture -Path $Path `
+        -SlideEnvelopes @((Get-PptxSlideXml -SpTreeChildren $sp)) `
+        -LinkRels @(@{ 'rIdLink1' = 'https://example.com/resources' })
+}
+
+function Build-PptxExtLstDecorative {
+    param([string] $Path)
+    # Picture has no descr/title/@decorative attribute; the alt-text rule must
+    # recognize the modern extLst <adec:decorative> marker as satisfying.
+    $sp = @(
+        Get-PptxTitleShape   -Id 2 -Text 'Welcome'
+        Get-PptxPictureShape -Id 3 -Descr '' -ExtLstDecorative $true
+    ) -join "`n"
+    Build-PptxFixture -Path $Path -SlideEnvelopes @((Get-PptxSlideXml -SpTreeChildren $sp))
+}
+
+function Build-PptxLowContrast {
+    param([string] $Path)
+    $sp = @(
+        Get-PptxTitleShape       -Id 2 -Text 'Status'
+        Get-PptxLowContrastShape -Id 6 -Text 'Hard to read'
+    ) -join "`n"
+    Build-PptxFixture -Path $Path -SlideEnvelopes @((Get-PptxSlideXmlWhiteBackground -SpTreeChildren $sp))
+}
+
 # --- Drive every builder ----------------------------------------------------
 
 $builders = @(
@@ -737,6 +1133,15 @@ $builders = @(
     @{ Name = 'excel-default-sheet-tab-name.xlsx';        Build = { param($p) Build-XlsxDefaultSheetTabName           -Path $p } }
     @{ Name = 'excel-default-table-name.xlsx';            Build = { param($p) Build-XlsxDefaultTableName              -Path $p } }
     @{ Name = 'excel-low-contrast.xlsx';                  Build = { param($p) Build-XlsxLowContrast                   -Path $p } }
+    @{ Name = 'powerpoint-accessible-baseline.pptx';      Build = { param($p) Build-PptxAccessibleBaseline            -Path $p } }
+    @{ Name = 'powerpoint-missing-slide-title.pptx';      Build = { param($p) Build-PptxMissingSlideTitle             -Path $p } }
+    @{ Name = 'powerpoint-missing-alt-text.pptx';         Build = { param($p) Build-PptxMissingAltText                -Path $p } }
+    @{ Name = 'powerpoint-missing-table-headers.pptx';    Build = { param($p) Build-PptxMissingTableHeaders           -Path $p } }
+    @{ Name = 'powerpoint-duplicate-slide-title.pptx';    Build = { param($p) Build-PptxDuplicateSlideTitle           -Path $p } }
+    @{ Name = 'powerpoint-merged-table-cells.pptx';       Build = { param($p) Build-PptxMergedTableCells              -Path $p } }
+    @{ Name = 'powerpoint-non-descriptive-link.pptx';     Build = { param($p) Build-PptxNonDescriptiveLink            -Path $p } }
+    @{ Name = 'powerpoint-low-contrast.pptx';             Build = { param($p) Build-PptxLowContrast                   -Path $p } }
+    @{ Name = 'powerpoint-extlst-decorative.pptx';        Build = { param($p) Build-PptxExtLstDecorative              -Path $p } }
 )
 
 foreach ($b in $builders) {

@@ -6,7 +6,7 @@
 [![PowerShell 7+](https://img.shields.io/badge/PowerShell-7%2B-blue?logo=powershell)](https://learn.microsoft.com/en-us/powershell/)
 ![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue?logo=windows)
 
-CLI accessibility checker for Office Open XML documents (`.docx`/`.docm`, `.xlsx`/`.xlsm`). Checks Microsoft's published [Accessibility Checker rules][rules] directly against OOXML using the [Open XML SDK][sdk]. Headless. No Office install required.
+CLI accessibility checker for Office Open XML documents (`.docx`/`.docm`, `.xlsx`/`.xlsm`, `.pptx`/`.pptm`). Checks Microsoft's published [Accessibility Checker rules][rules] directly against OOXML using the [Open XML SDK][sdk]. Headless. No Office install required.
 
 [rules]: https://support.microsoft.com/en-us/office/rules-for-the-accessibility-checker-651e08f2-0fc3-4e10-aaca-74b4a67101c1
 [sdk]: https://www.nuget.org/packages/documentformat.openxml
@@ -39,7 +39,7 @@ The dispatcher picks the right checker based on file extension. You can also cal
 
 ### Bulk scan
 
-Pass a directory instead of a file to scan many files in one invocation. Supported extensions (`.docx`, `.docm`, `.xlsx`, `.xlsm`) are picked up; everything else is silently skipped. Office lock files (`~$*`) are ignored.
+Pass a directory instead of a file to scan many files in one invocation. Supported extensions (`.docx`, `.docm`, `.xlsx`, `.xlsm`, `.pptx`, `.pptm`) are picked up; everything else is silently skipped. Office lock files (`~$*`) are ignored.
 
 ```powershell
 .\scripts\check-office-accessibility.ps1 path\to\folder
@@ -82,7 +82,8 @@ In text mode, only ERRORs cause `FAIL`. In detailed mode, every issue is listed 
 |-----------|------------|
 | `.docx`, `.docm` | `check-docx-accessibility.ps1` |
 | `.xlsx`, `.xlsm` | `check-xlsx-accessibility.ps1` |
-| `.doc`, `.xls`   | **Not supported.** Legacy binary formats; re-save as `.docx`/`.xlsx`. Exits 2. |
+| `.pptx`, `.pptm` | `check-pptx-accessibility.ps1` |
+| `.doc`, `.xls`, `.ppt` | **Not supported.** Legacy binary formats; re-save as `.docx`/`.xlsx`/`.pptx`. Exits 2. |
 
 ## Rules implemented
 
@@ -114,6 +115,19 @@ In text mode, only ERRORs cause `FAIL`. In detailed mode, every issue is listed 
 | WARNING  | `LowContrast` | Best-effort. Flags cells whose font color and cell fill are both explicit RGB values and whose WCAG contrast ratio falls below 4.5:1. Theme references, indexed-palette colors, "auto", non-solid fills, and conditional formatting are skipped. |
 | TIP      | `DefaultTableName` | Table name matches `^Table\d+$`. |
 
+### PowerPoint
+
+| Severity | Rule | What it checks |
+|----------|------|----------------|
+| ERROR    | `MissingAltText` | Every non-placeholder shape, picture, chart/SmartArt graphic frame, connector, and group child has alt text, a title, or `decorative="1"`. Tables (graphic frames containing `a:tbl`) are exempt because their cells already expose accessible text. |
+| ERROR    | `MissingSlideTitle` | Every slide has a title placeholder (`p:ph/@type` ∈ {`title`, `ctrTitle`}) with non-empty text. Triggers both for slides with no title placeholder and for slides whose placeholder text is blank. |
+| ERROR    | `MissingTableHeaders` | Every `a:tbl` has `a:tblPr/@firstRow="1"` (the table-style header-row marker). |
+| ERROR    | `DocumentProtected` | File is IRM- or password-protected. |
+| WARNING  | `DuplicateSlideTitle` | Two or more slides share the same title text (case-insensitive, trimmed). |
+| WARNING  | `MergedTableCells` | Tables with cells using `gridSpan>1`, `rowSpan>1`, `hMerge="1"`, or `vMerge="1"`. |
+| WARNING  | `LowContrast` | Best-effort. Flags runs whose foreground (`a:rPr/a:solidFill/a:srgbClr`) and background (owning shape's `p:spPr` solid fill, falling back to the slide's `p:cSld/p:bg` solid fill) are both explicit RGB and whose WCAG contrast ratio falls below 4.5:1. Theme/scheme colors, gradients, and inherited fills are skipped. |
+| WARNING  | `NonDescriptiveLinkText` | Run-level hyperlinks (`a:rPr/a:hlinkClick`) whose visible text is empty, equals the URL, or matches a generic phrase such as `click here`, `here`, `more`, `read more`, `link`, `this link`. |
+
 ## Known limitations
 
 - **Contrast.** Best-effort only (`LowContrast` rule). The check requires both foreground and background to be explicit RGB values; runs/cells whose colors come from theme references, "auto", indexed palettes, style inheritance, or conditional formatting are skipped because resolving them faithfully requires rendering. Expect false negatives for documents that rely on themed colors.
@@ -125,7 +139,7 @@ In text mode, only ERRORs cause `FAIL`. In detailed mode, every issue is listed 
 
 ### Running tests
 
-A manifest-driven Pester suite lives under [scripts/tests/](scripts/tests/). It runs each checker against committed accessible/inaccessible Word and Excel fixtures and asserts that the exit code and reported rules match [manifest.psd1](scripts/tests/fixtures/manifest.psd1).
+A manifest-driven Pester suite lives under [scripts/tests/](scripts/tests/). It runs each checker against committed accessible/inaccessible Word, Excel, and PowerPoint fixtures and asserts that the exit code and reported rules match [manifest.psd1](scripts/tests/fixtures/manifest.psd1).
 
 ```powershell
 # Idempotent: fetches the Open XML SDK + Pester 5 if missing, then runs the suite.
@@ -162,9 +176,10 @@ If set and the file exists, this takes precedence over the bundled `scripts\lib\
 ```
 scripts/
   setup-accessibility-checker.ps1   # one-time SDK download
-  check-office-accessibility.ps1    # dispatcher (.docx / .xlsx -> right checker)
+  check-office-accessibility.ps1    # dispatcher (.docx / .xlsx / .pptx -> right checker)
   check-docx-accessibility.ps1      # Word rules
   check-xlsx-accessibility.ps1      # Excel rules
+  check-pptx-accessibility.ps1      # PowerPoint rules
   lint.ps1                          # PSScriptAnalyzer wrapper
   lib/                              # gitignored; populated by setup script
   tests/
@@ -173,7 +188,7 @@ scripts/
     Invoke-Tests.ps1                # local convenience wrapper
     fixtures/
       manifest.psd1                 # filename -> expected exit + rule names
-      *.docx, *.xlsx                # committed; rebuild via Build-Fixtures.ps1
+      *.docx, *.xlsx, *.pptx        # committed; rebuild via Build-Fixtures.ps1
 .github/workflows/ci.yml            # lint + test on windows-latest
 ```
 

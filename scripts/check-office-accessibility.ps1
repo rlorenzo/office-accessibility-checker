@@ -1,12 +1,13 @@
 <#
 .SYNOPSIS
-    Dispatcher that runs the right OOXML accessibility checker for a Word or
-    Excel file, mirroring the veraPDF-style CLI surface. Also supports bulk
-    scanning when given a directory.
+    Dispatcher that runs the right OOXML accessibility checker for a Word,
+    Excel, or PowerPoint file, mirroring the veraPDF-style CLI surface. Also
+    supports bulk scanning when given a directory.
 
 .PARAMETER Path
-    Path to a .docx, .docm, .xlsx, or .xlsm file, or a directory containing
-    such files. The legacy parameter name -FilePath is kept as an alias.
+    Path to a .docx, .docm, .xlsx, .xlsm, .pptx, or .pptm file, or a directory
+    containing such files. The legacy parameter name -FilePath is kept as an
+    alias.
 
 .PARAMETER Recurse
     When -Path is a directory, also descend into subdirectories. Ignored when
@@ -57,8 +58,12 @@ if (-not $item.PSIsContainer) {
             & (Join-Path $PSScriptRoot 'check-xlsx-accessibility.ps1') -FilePath $item.FullName -Format $Format
             exit $LASTEXITCODE
         }
-        { $_ -in '.doc', '.xls' } {
-            [Console]::Error.WriteLine("Unsupported format: legacy binary Office files ($ext) are not supported. Re-save as .docx/.xlsx.")
+        { $_ -in '.pptx', '.pptm' } {
+            & (Join-Path $PSScriptRoot 'check-pptx-accessibility.ps1') -FilePath $item.FullName -Format $Format
+            exit $LASTEXITCODE
+        }
+        { $_ -in '.doc', '.xls', '.ppt' } {
+            [Console]::Error.WriteLine("Unsupported format: legacy binary Office files ($ext) are not supported. Re-save as .docx/.xlsx/.pptx.")
             exit 2
         }
         default {
@@ -87,7 +92,7 @@ $allFiles = @(Get-ChildItem @gciParams)
 # would error noisily; filter them out.
 $supported = @(
     $allFiles | Where-Object {
-        $_.Extension -match '^\.(docx|docm|xlsx|xlsm)$' -and $_.Name -notlike '~$*'
+        $_.Extension -match '^\.(docx|docm|xlsx|xlsm|pptx|pptm)$' -and $_.Name -notlike '~$*'
     }
 )
 $skipped = $allFiles.Count - $supported.Count
