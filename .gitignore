@@ -3,3 +3,6 @@ scripts/lib/
 
 # Pester output
 testResults.xml
+
+# macOS
+.DS_Store

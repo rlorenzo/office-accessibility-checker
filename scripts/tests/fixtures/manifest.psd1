@@ -158,6 +158,77 @@
             MustContain    = @('LowContrast')
             MustNotContain = @()
             Notes          = 'Cell A1 styled with explicit light-grey font on solid white fill (~1.6:1 contrast).'
+        },
+
+        # --- PowerPoint: accessible baseline -------------------------------
+        @{
+            File           = 'powerpoint-accessible-baseline.pptx'
+            ExpectedExit   = 0
+            MustContain    = @()
+            MustNotContain = @(
+                'MissingAltText', 'MissingSlideTitle', 'MissingTableHeaders',
+                'DuplicateSlideTitle', 'MergedTableCells', 'NonDescriptiveLinkText',
+                'LowContrast'
+            )
+            Notes          = 'Title shape with text, alt-tagged picture, table with header row, descriptively-labeled hyperlink.'
+        },
+
+        # --- PowerPoint: per-rule inaccessible fixtures --------------------
+        @{
+            File           = 'powerpoint-missing-slide-title.pptx'
+            ExpectedExit   = 1
+            MustContain    = @('MissingSlideTitle')
+            MustNotContain = @()
+            Notes          = 'Slide carries a title placeholder shape but the placeholder text is empty.'
+        },
+        @{
+            File           = 'powerpoint-missing-alt-text.pptx'
+            ExpectedExit   = 1
+            MustContain    = @('MissingAltText')
+            MustNotContain = @()
+            Notes          = 'Picture inserted with alt text deleted (Picture Format > Alt Text > clear).'
+        },
+        @{
+            File           = 'powerpoint-missing-table-headers.pptx'
+            ExpectedExit   = 1
+            MustContain    = @('MissingTableHeaders')
+            MustNotContain = @()
+            Notes          = 'Table inserted with the "Header Row" table-style option turned off.'
+        },
+        @{
+            File           = 'powerpoint-duplicate-slide-title.pptx'
+            ExpectedExit   = 0
+            MustContain    = @('DuplicateSlideTitle')
+            MustNotContain = @()
+            Notes          = 'Three-slide deck where the first and third slide share the same title text.'
+        },
+        @{
+            File           = 'powerpoint-merged-table-cells.pptx'
+            ExpectedExit   = 0
+            MustContain    = @('MergedTableCells')
+            MustNotContain = @()
+            Notes          = 'Table with two cells merged horizontally in the first row (gridSpan="2").'
+        },
+        @{
+            File           = 'powerpoint-non-descriptive-link.pptx'
+            ExpectedExit   = 0
+            MustContain    = @('NonDescriptiveLinkText')
+            MustNotContain = @()
+            Notes          = 'Hyperlink whose visible text is "click here" rather than something descriptive.'
+        },
+        @{
+            File           = 'powerpoint-low-contrast.pptx'
+            ExpectedExit   = 0
+            MustContain    = @('LowContrast')
+            MustNotContain = @()
+            Notes          = 'Shape with explicit white fill containing a single light-grey-coloured text run (~1.6:1).'
+        },
+        @{
+            File           = 'powerpoint-extlst-decorative.pptx'
+            ExpectedExit   = 0
+            MustContain    = @()
+            MustNotContain = @('MissingAltText')
+            Notes          = 'Picture marked decorative via the modern Office extLst marker, not the legacy @decorative attribute.'
         }
     )
 }
