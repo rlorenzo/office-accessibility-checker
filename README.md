@@ -4,16 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/rlorenzo?label=Sponsor&logo=GitHub)](https://github.com/sponsors/rlorenzo)
 [![PowerShell 7+](https://img.shields.io/badge/PowerShell-7%2B-blue?logo=powershell)](https://learn.microsoft.com/en-us/powershell/)
-![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue?logo=windows)
+![Cross-platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 
-A command-line tool that checks Word, Excel, and PowerPoint files for accessibility problems — the same kinds of issues Microsoft's built-in Accessibility Checker reports. No copy of Office required.
+A command-line tool that checks Word, Excel, and PowerPoint files for accessibility problems — the same kinds of issues Microsoft's built-in Accessibility Checker reports. No copy of Office required. Runs on Windows, macOS, and Linux.
+
+## Requirements
+
+PowerShell 7 or newer. Microsoft maintains [install instructions for Windows, macOS, and Linux](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell). Once `pwsh` is on your path, you're set.
 
 ## Quick start
 
 ```powershell
-.\scripts\setup-accessibility-checker.ps1
-.\scripts\check-office-accessibility.ps1 path\to\file.docx
-# PASS path\to\file.docx
+./scripts/setup-accessibility-checker.ps1
+./scripts/check-office-accessibility.ps1 path/to/file.docx
+# PASS path/to/file.docx
 ```
 
 The setup step is a one-time download. After that, run the checker on any `.docx`, `.xlsx`, `.pptx` file (macro-enabled `.docm`/`.xlsm`/`.pptm` work too).
@@ -23,14 +27,14 @@ The setup step is a one-time download. After that, run the checker on any `.docx
 By default you get a single line per file:
 
 ```powershell
-.\scripts\check-office-accessibility.ps1 report.docx
+./scripts/check-office-accessibility.ps1 report.docx
 # FAIL report.docx: MissingAltText, MissingTableHeaders
 ```
 
 For the full list of issues, add `-Format detailed`:
 
 ```powershell
-.\scripts\check-office-accessibility.ps1 report.docx -Format detailed
+./scripts/check-office-accessibility.ps1 report.docx -Format detailed
 # ERROR    MissingAltText        Image "chart" has no alt text
 # WARNING  MergedTableCells      Table 1 contains merged cells
 # FAIL report.docx: MissingAltText
@@ -43,10 +47,10 @@ Issues come in three categories: **ERROR** (likely blocks people with disabiliti
 Pass a folder instead of a file. Subfolders are not searched unless you add `-Recurse`.
 
 ```powershell
-.\scripts\check-office-accessibility.ps1 path\to\folder -Recurse
-# PASS folder\report.docx
-# FAIL folder\budget.xlsx: MissingAltText
-# PASS folder\memo.docx
+./scripts/check-office-accessibility.ps1 path/to/folder -Recurse
+# PASS folder/report.docx
+# FAIL folder/budget.xlsx: MissingAltText
+# PASS folder/memo.docx
 ```
 
 A summary footer (`Scanned N files: X passed, …`) is written to standard error. A single corrupt file produces an `ERROR` line and the scan keeps going.
@@ -56,7 +60,7 @@ A summary footer (`Scanned N files: X passed, …`) is written to standard error
 Add `-Fix` and a sibling file named `<original>.fixed.<ext>` is written with safe, automatic repairs applied. **Your original file is never modified.**
 
 ```powershell
-.\scripts\check-office-accessibility.ps1 report.docx -Fix
+./scripts/check-office-accessibility.ps1 report.docx -Fix
 # FAIL report.docx: MissingTableHeaders, LowContrast
 # FIXED report.fixed.docx: MissingTableHeaders (2), LowContrast (5)
 # PASS report.fixed.docx
@@ -134,8 +138,8 @@ For exact behavior — including OOXML-level details, intentional exemptions, an
 ## Development
 
 ```powershell
-.\scripts\tests\Invoke-Tests.ps1   # run the test suite
-.\scripts\lint.ps1                  # run the linter
+./scripts/tests/Invoke-Tests.ps1   # run the test suite
+./scripts/lint.ps1                  # run the linter
 ```
 
 Tests and fixtures live under [`scripts/tests/`](scripts/tests/). The technical rule catalog and autofix design notes are in [`docs/RULES.md`](docs/RULES.md). See [CONTRIBUTING.md](CONTRIBUTING.md) for the developer workflow.

@@ -112,5 +112,5 @@ scripts/
       *.docx, *.xlsx, *.pptx        # committed; rebuild via Build-Fixtures.ps1
 docs/
   RULES.md                          # this document
-.github/workflows/ci.yml            # lint + test on windows-latest
+.github/workflows/ci.yml            # lint (Windows) + Pester matrix on Windows/macOS/Linux
 ```

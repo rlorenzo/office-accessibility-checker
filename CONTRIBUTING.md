@@ -15,14 +15,14 @@ For suspected security issues, see [SECURITY.md](SECURITY.md) instead.
 
 ## Local setup
 
-Requires PowerShell 7+ on Windows.
+Requires PowerShell 7+. Microsoft maintains [install instructions for Windows, macOS, and Linux](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell).
 
 ```powershell
-# Download the Open XML SDK into scripts\lib\ (idempotent)
-.\scripts\setup-accessibility-checker.ps1
+# Download the Open XML SDK into scripts/lib/ (idempotent)
+./scripts/setup-accessibility-checker.ps1
 
 # Run the test suite
-.\scripts\tests\Invoke-Tests.ps1
+./scripts/tests/Invoke-Tests.ps1
 ```
 
 `Invoke-Tests.ps1` installs Pester 5 if missing, then runs the manifest-driven Pester suite at [scripts/tests/](scripts/tests/).
@@ -39,8 +39,8 @@ Requires PowerShell 7+ on Windows.
 ## Running checks before pushing
 
 ```powershell
-.\scripts\lint.ps1                  # PSScriptAnalyzer
-.\scripts\tests\Invoke-Tests.ps1    # Pester suite
+./scripts/lint.ps1                  # PSScriptAnalyzer
+./scripts/tests/Invoke-Tests.ps1    # Pester suite
 ```
 
 Both run in CI on every push and pull request via [.github/workflows/ci.yml](.github/workflows/ci.yml).

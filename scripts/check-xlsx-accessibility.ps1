@@ -114,7 +114,7 @@ foreach ($candidate in $sdkCandidates) {
 }
 
 if (-not $sdkPath) {
-    [Console]::Error.WriteLine("Open XML SDK not found. Run scripts\setup-accessibility-checker.ps1 first.")
+    [Console]::Error.WriteLine("Open XML SDK not found. Run scripts/setup-accessibility-checker.ps1 first.")
     exit 2
 }
 
