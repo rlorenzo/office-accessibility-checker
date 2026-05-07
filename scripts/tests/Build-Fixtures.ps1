@@ -18,8 +18,8 @@
     does not emit.
 
 .NOTES
-    Run scripts\setup-accessibility-checker.ps1 first to populate
-    scripts\lib\. This script reuses the same SDK DLL the checkers load.
+    Run scripts/setup-accessibility-checker.ps1 first to populate
+    scripts/lib/. This script reuses the same SDK DLL the checkers load.
 #>
 
 [CmdletBinding()]
@@ -39,7 +39,7 @@ if ($env:OPENXML_SDK_PATH -and (Test-Path -LiteralPath $env:OPENXML_SDK_PATH)) {
     if (Test-Path -LiteralPath $candidate) { $sdkPath = $candidate }
 }
 if (-not $sdkPath) {
-    [Console]::Error.WriteLine("Open XML SDK not found. Run scripts\setup-accessibility-checker.ps1 first.")
+    [Console]::Error.WriteLine("Open XML SDK not found. Run scripts/setup-accessibility-checker.ps1 first.")
     exit 2
 }
 Add-Type -Path $sdkPath

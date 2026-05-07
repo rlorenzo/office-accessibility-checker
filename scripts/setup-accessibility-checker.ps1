@@ -1,11 +1,11 @@
 ﻿<#
 .SYNOPSIS
-    One-time setup: fetches the Open XML SDK DLLs into scripts\lib\.
+    One-time setup: fetches the Open XML SDK DLLs into scripts/lib/.
 
 .DESCRIPTION
     Downloads DocumentFormat.OpenXml (and required transitive deps) directly
     from nuget.org as .nupkg archives, extracts the runtime DLLs into
-    scripts\lib\, and cleans up the temp folder. Idempotent — re-running
+    scripts/lib/, and cleans up the temp folder. Idempotent — re-running
     is a no-op when the pinned DLL already exists.
 
 .NOTES

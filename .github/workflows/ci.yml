@@ -25,15 +25,18 @@ jobs:
         run: ./scripts/lint.ps1
 
   test:
-    name: Pester
-    runs-on: windows-latest
+    name: Pester (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      # The SDK download is two ~5 MB nupkgs and runs in seconds; caching is
-      # intentionally omitted in v1. If CI time becomes a concern, wire up
-      # actions/cache here keyed on the hash of setup-accessibility-checker.ps1
-      # (the pinned versions live there).
+      # GitHub-hosted runners ship pwsh on all three OSes, so no install step
+      # is needed. The SDK download is two ~5 MB nupkgs and runs in seconds;
+      # caching is intentionally omitted in v1.
       - name: Install Open XML SDK
         shell: pwsh
         run: ./scripts/setup-accessibility-checker.ps1
@@ -58,5 +61,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pester-results
+          name: pester-results-${{ matrix.os }}
           path: testResults.xml
