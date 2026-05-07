@@ -30,11 +30,20 @@
     'detailed' emits every issue (one tab-separated line) followed by the
     PASS/FAIL summary line.
 
+.PARAMETER Fix
+    When set, after running the checks the script writes a sibling file named
+    <basename>.fixed.xlsx (or .xlsm) with deterministic structural remediations
+    applied for the rules MissingTableHeaders, RedOnlyNegativeFormatting, and
+    LowContrast. The original file is never modified.
+
 .OUTPUTS
     Exit codes:
       0  no errors found (warnings/tips do not fail)
       1  one or more accessibility errors found (includes IRM/password-protected)
       2  tool error (file not found, unsupported format, SDK load failure, file locked)
+
+      With -Fix, the exit code reflects the FIXED file when fixes were applied,
+      otherwise the original file.
 #>
 
 [CmdletBinding()]
@@ -43,7 +52,9 @@ param(
     [string] $FilePath,
 
     [ValidateSet('text','detailed')]
-    [string] $Format = 'text'
+    [string] $Format = 'text',
+
+    [switch] $Fix
 )
 
 $ErrorActionPreference = 'Stop'
@@ -614,6 +625,294 @@ function Test-LowContrast {
 }
 
 #--------------------------------------------------------------------
+# Autofix helpers
+#--------------------------------------------------------------------
+# See check-docx-accessibility.ps1 for the full HSL/contrast notes — the
+# helpers are duplicated rather than shared because each checker is meant
+# to be runnable on its own.
+
+function ConvertTo-Hsl {
+    param([Parameter(Mandatory)] [string] $Hex)
+    $r = [Convert]::ToInt32($Hex.Substring(0, 2), 16) / 255.0
+    $g = [Convert]::ToInt32($Hex.Substring(2, 2), 16) / 255.0
+    $b = [Convert]::ToInt32($Hex.Substring(4, 2), 16) / 255.0
+    $max = [Math]::Max([Math]::Max($r, $g), $b)
+    $min = [Math]::Min([Math]::Min($r, $g), $b)
+    $L = ($max + $min) / 2.0
+    if ($max -eq $min) { return [pscustomobject]@{ H = 0.0; S = 0.0; L = $L } }
+    $d = $max - $min
+    $S = if ($L -gt 0.5) { $d / (2.0 - $max - $min) } else { $d / ($max + $min) }
+    $H = 0.0
+    if     ($max -eq $r) { $H = (($g - $b) / $d) + ($(if ($g -lt $b) { 6.0 } else { 0.0 })) }
+    elseif ($max -eq $g) { $H = (($b - $r) / $d) + 2.0 }
+    else                 { $H = (($r - $g) / $d) + 4.0 }
+    return [pscustomobject]@{ H = ($H / 6.0); S = $S; L = $L }
+}
+
+function Get-HueChannel {
+    param([double] $p, [double] $q, [double] $t)
+    if ($t -lt 0) { $t += 1 }
+    if ($t -gt 1) { $t -= 1 }
+    if ($t -lt (1.0 / 6.0)) { return $p + ($q - $p) * 6.0 * $t }
+    if ($t -lt 0.5) { return $q }
+    if ($t -lt (2.0 / 3.0)) { return $p + ($q - $p) * ((2.0 / 3.0) - $t) * 6.0 }
+    return $p
+}
+
+function ConvertFrom-Hsl {
+    param([Parameter(Mandatory)] [double] $H,
+          [Parameter(Mandatory)] [double] $S,
+          [Parameter(Mandatory)] [double] $L)
+    if ($S -eq 0) { $r = $L; $g = $L; $b = $L }
+    else {
+        $q = if ($L -lt 0.5) { $L * (1.0 + $S) } else { $L + $S - ($L * $S) }
+        $p = (2.0 * $L) - $q
+        $r = Get-HueChannel $p $q ($H + (1.0 / 3.0))
+        $g = Get-HueChannel $p $q $H
+        $b = Get-HueChannel $p $q ($H - (1.0 / 3.0))
+    }
+    $rByte = [int][Math]::Round($r * 255)
+    $gByte = [int][Math]::Round($g * 255)
+    $bByte = [int][Math]::Round($b * 255)
+    return ('{0:X2}{1:X2}{2:X2}' -f $rByte, $gByte, $bByte)
+}
+
+function Get-NearestPassingForeground {
+    param(
+        [Parameter(Mandatory)] [string] $ForegroundHex,
+        [Parameter(Mandatory)] [string] $BackgroundHex,
+        [double] $Threshold = 4.5
+    )
+    if ((Get-ContrastRatio -ForegroundHex $ForegroundHex -BackgroundHex $BackgroundHex) -ge $Threshold) {
+        return $ForegroundHex
+    }
+    $hsl = ConvertTo-Hsl -Hex $ForegroundHex
+    $step = 0.005
+    $bestDark = $null; $deltaDark = [double]::PositiveInfinity
+    for ($L = $hsl.L - $step; $L -ge 0; $L -= $step) {
+        $cand = ConvertFrom-Hsl -H $hsl.H -S $hsl.S -L $L
+        if ((Get-ContrastRatio -ForegroundHex $cand -BackgroundHex $BackgroundHex) -ge $Threshold) {
+            $bestDark = $cand; $deltaDark = $hsl.L - $L; break
+        }
+    }
+    $bestLight = $null; $deltaLight = [double]::PositiveInfinity
+    for ($L = $hsl.L + $step; $L -le 1; $L += $step) {
+        $cand = ConvertFrom-Hsl -H $hsl.H -S $hsl.S -L $L
+        if ((Get-ContrastRatio -ForegroundHex $cand -BackgroundHex $BackgroundHex) -ge $Threshold) {
+            $bestLight = $cand; $deltaLight = $L - $hsl.L; break
+        }
+    }
+    if ($bestDark -and $deltaDark -le $deltaLight) { return $bestDark }
+    if ($bestLight) { return $bestLight }
+    $blackR = Get-ContrastRatio -ForegroundHex '000000' -BackgroundHex $BackgroundHex
+    $whiteR = Get-ContrastRatio -ForegroundHex 'FFFFFF' -BackgroundHex $BackgroundHex
+    if ($blackR -ge $whiteR) { return '000000' } else { return 'FFFFFF' }
+}
+
+# Removes headerRowCount="0" from a single TableDefinitionPart's table element.
+# Excel defaults headerRowCount to 1 when the attribute is absent, so deleting
+# it is the correct way to re-enable a header row. Returns 1 if it changed
+# anything, else 0.
+function Repair-XlsxTableHeader {
+    param($TableDefinitionPart)
+    $doc = Get-PartXDocument -Part $TableDefinitionPart
+    if ($null -eq $doc -or $null -eq $doc.Root) { return 0 }
+    $tableEl = $doc.Root
+    $hrcAttr = $tableEl.Attribute([System.Xml.Linq.XName]::Get('headerRowCount'))
+    if ($null -eq $hrcAttr -or $hrcAttr.Value -ne '0') { return 0 }
+    $hrcAttr.Remove()
+    Save-PartXDocument -Part $TableDefinitionPart -Document $doc
+    return 1
+}
+
+# Rewrite [Red]-only negative format codes to add a leading minus to the
+# negative section. We deliberately do not strip [Red] (the user picked that
+# styling); we just augment the format with a sign so the value is also
+# distinguishable for color-blind users. Returns the count of numFmt entries
+# rewritten in this stylesheet.
+function Repair-XlsxRedOnlyNumberFormat {
+    param($WorkbookStylesPart,
+          [System.Collections.Generic.HashSet[string]] $UsedNumFmtIds)
+    if ($null -eq $WorkbookStylesPart) { return 0 }
+    $doc = Get-PartXDocument -Part $WorkbookStylesPart
+    if ($null -eq $doc -or $null -eq $doc.Root) { return 0 }
+    $numFmtsEl = Get-ChildElement -Parent $doc.Root -Namespace $NS.s -LocalName 'numFmts'
+    if ($null -eq $numFmtsEl) { return 0 }
+
+    $fixed = 0
+    foreach ($numFmt in (Get-ChildElement -Parent $numFmtsEl -Namespace $NS.s -LocalName 'numFmt' -All)) {
+        $numFmtId = Get-XAttr -Element $numFmt -Namespace $null -LocalName 'numFmtId'
+        if ($UsedNumFmtIds -and -not [string]::IsNullOrEmpty($numFmtId) -and -not $UsedNumFmtIds.Contains($numFmtId)) { continue }
+        $code = Get-XAttr -Element $numFmt -Namespace $null -LocalName 'formatCode'
+        if ([string]::IsNullOrEmpty($code)) { continue }
+        $sections = $code -split ';'
+        if ($sections.Count -lt 2) { continue }
+        $negative = $sections[1]
+        if ([string]::IsNullOrEmpty($negative)) { continue }
+        if ($negative -notmatch '(?i)\[Red\]') { continue }
+        $stripped = $negative -replace '(?i)\[Red\]', ''
+        if ($stripped -match '(?i)\[(Black|Blue|Cyan|Green|Magenta|White|Yellow|Color\s*\d+)\]') { continue }
+        if ($stripped.Contains('(') -or $stripped.Contains(')')) { continue }
+        $strippedNoBrackets = $stripped -replace '\[[^\]]*\]', ''
+        if ($strippedNoBrackets.TrimStart() -match '^\s*-') { continue }
+
+        # Insert a literal '-' immediately after the [Red] marker (or any
+        # other leading bracket-conditional). regex captures [Red] at start
+        # of the section, and any preceding [<...>] conditionals.
+        $newNegative = $negative -replace '(?i)^(\s*(?:\[[^\]]*\]\s*)*)\[Red\]', '${1}[Red]-'
+        if ($newNegative -eq $negative) { continue }
+        $sections[1] = $newNegative
+        $newCode = $sections -join ';'
+        $numFmt.SetAttributeValue([System.Xml.Linq.XName]::Get('formatCode'), $newCode)
+        $fixed++
+    }
+
+    if ($fixed -gt 0) { Save-PartXDocument -Part $WorkbookStylesPart -Document $doc }
+    return $fixed
+}
+
+# Walk every text cell, resolve the cellXf -> font/fill chain, and for each
+# cell whose contrast falls below 4.5:1 create (or reuse) a font with the
+# nearest passing color and rebind the cellXf to it. Cells whose color comes
+# from theme/indexed/auto, or whose fill is non-solid, are skipped — same
+# bar the rule uses.
+function Repair-XlsxLowContrast {
+    param($WorkbookPart)
+    if ($null -eq $WorkbookPart -or $null -eq $WorkbookPart.WorkbookStylesPart) { return 0 }
+    $stylesPart = $WorkbookPart.WorkbookStylesPart
+    $stylesDoc  = Get-PartXDocument -Part $stylesPart
+    if ($null -eq $stylesDoc -or $null -eq $stylesDoc.Root) { return 0 }
+
+    $fontsEl   = Get-ChildElement -Parent $stylesDoc.Root -Namespace $NS.s -LocalName 'fonts'
+    $fillsEl   = Get-ChildElement -Parent $stylesDoc.Root -Namespace $NS.s -LocalName 'fills'
+    $cellXfsEl = Get-ChildElement -Parent $stylesDoc.Root -Namespace $NS.s -LocalName 'cellXfs'
+    if ($null -eq $fontsEl -or $null -eq $cellXfsEl) { return 0 }
+
+    # Get-ChildElement -All returns its array via the unary-comma trick so that
+    # a single-result call still iterates correctly. Wrapping with @() here would
+    # double-wrap (count collapses to 1), so we assign the bare result.
+    $fontEls = Get-ChildElement -Parent $fontsEl -Namespace $NS.s -LocalName 'font' -All
+    $fillEls = if ($fillsEl) { Get-ChildElement -Parent $fillsEl -Namespace $NS.s -LocalName 'fill' -All } else { @() }
+    $xfEls   = Get-ChildElement -Parent $cellXfsEl -Namespace $NS.s -LocalName 'xf' -All
+
+    # Resolve fill colors once.
+    $fillHex = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($fill in $fillEls) {
+        $hex = $null
+        $pf = Get-ChildElement -Parent $fill -Namespace $NS.s -LocalName 'patternFill'
+        if ($pf -and (Get-XAttr -Element $pf -Namespace $null -LocalName 'patternType') -eq 'solid') {
+            $fgColorEl = Get-ChildElement -Parent $pf -Namespace $NS.s -LocalName 'fgColor'
+            $hex = Get-ExcelExplicitColorHex $fgColorEl
+        }
+        $fillHex.Add($hex) | Out-Null
+    }
+
+    # Track desired color overrides: original FontId -> (hex(BG) -> new FontId).
+    # Each unique (font, bg) pair gets one synthesised font; cellXfs that share
+    # the pair share the new font.
+    $newFontByPair = @{}
+    $fixed = 0
+
+    $cName = [System.Xml.Linq.XName]::Get('c', $NS.s)
+    foreach ($wsPart in $WorkbookPart.WorksheetParts) {
+        $wsDoc = Get-PartXDocument -Part $wsPart
+        if ($null -eq $wsDoc -or $null -eq $wsDoc.Root) { continue }
+
+        $wsChanged = $false
+        foreach ($cell in $wsDoc.Root.Descendants($cName)) {
+            $sAttr = $cell.Attribute([System.Xml.Linq.XName]::Get('s'))
+            if ($null -eq $sAttr) { continue }
+            $hasContent = $false
+            foreach ($child in $cell.Elements()) {
+                $ln = $child.Name.LocalName
+                if ($ln -eq 'v' -or $ln -eq 'f' -or $ln -eq 'is') { $hasContent = $true; break }
+            }
+            if (-not $hasContent) { continue }
+            $sIdx = -1
+            if (-not [int]::TryParse($sAttr.Value, [ref] $sIdx)) { continue }
+            if ($sIdx -lt 0 -or $sIdx -ge $xfEls.Count) { continue }
+
+            $xf = $xfEls[$sIdx]
+            $fontId = 0; [int]::TryParse((Get-XAttr -Element $xf -Namespace $null -LocalName 'fontId'), [ref] $fontId) | Out-Null
+            $fillId = 0; [int]::TryParse((Get-XAttr -Element $xf -Namespace $null -LocalName 'fillId'), [ref] $fillId) | Out-Null
+            if ($fontId -lt 0 -or $fontId -ge $fontEls.Count) { continue }
+            if ($fillId -lt 0 -or $fillId -ge $fillHex.Count) { continue }
+            $fontEl = $fontEls[$fontId]
+            $fontColorEl = Get-ChildElement -Parent $fontEl -Namespace $NS.s -LocalName 'color'
+            $fg = Get-ExcelExplicitColorHex $fontColorEl
+            $bg = $fillHex[$fillId]
+            if ([string]::IsNullOrEmpty($fg) -or [string]::IsNullOrEmpty($bg)) { continue }
+            if ((Get-ContrastRatio -ForegroundHex $fg -BackgroundHex $bg) -ge 4.5) { continue }
+
+            $newFg = Get-NearestPassingForeground -ForegroundHex $fg -BackgroundHex $bg -Threshold 4.5
+            if (-not $newFg -or $newFg -eq $fg.ToUpper()) { continue }
+
+            $pairKey = "{0}|{1}" -f $fontId, $bg.ToUpper()
+            if (-not $newFontByPair.ContainsKey($pairKey)) {
+                # Clone the original font, set the new color, append, and
+                # record its new index.
+                $cloned = New-Object System.Xml.Linq.XElement -ArgumentList $fontEl
+                $clonedColor = Get-ChildElement -Parent $cloned -Namespace $NS.s -LocalName 'color'
+                if ($clonedColor) {
+                    foreach ($attrName in @('theme','indexed','auto','rgb','tint')) {
+                        $a = $clonedColor.Attribute([System.Xml.Linq.XName]::Get($attrName))
+                        if ($a) { $a.Remove() }
+                    }
+                    $clonedColor.SetAttributeValue([System.Xml.Linq.XName]::Get('rgb'), 'FF' + $newFg)
+                } else {
+                    $newColor = New-Object System.Xml.Linq.XElement -ArgumentList ([System.Xml.Linq.XName]::Get('color', $NS.s))
+                    $newColor.SetAttributeValue([System.Xml.Linq.XName]::Get('rgb'), 'FF' + $newFg)
+                    $cloned.Add($newColor)
+                }
+                $fontsEl.Add($cloned)
+                $newFontByPair[$pairKey] = $fontEls.Count
+                $fontEls += ,$cloned
+            }
+
+            # Clone the cellXf, point at the new font, append, and rebind the cell.
+            $newFontId = $newFontByPair[$pairKey]
+            $clonedXfKey = "$sIdx|$newFontId"
+            $clonedXfIdx = $null
+            if ($newFontByPair.ContainsKey("xf:$clonedXfKey")) {
+                $clonedXfIdx = $newFontByPair["xf:$clonedXfKey"]
+            } else {
+                $clonedXf = New-Object System.Xml.Linq.XElement -ArgumentList $xf
+                $clonedXf.SetAttributeValue([System.Xml.Linq.XName]::Get('fontId'), $newFontId)
+                $clonedXf.SetAttributeValue([System.Xml.Linq.XName]::Get('applyFont'), '1')
+                $cellXfsEl.Add($clonedXf)
+                $clonedXfIdx = $xfEls.Count
+                $xfEls += ,$clonedXf
+                $newFontByPair["xf:$clonedXfKey"] = $clonedXfIdx
+            }
+            $sAttr.Value = "$clonedXfIdx"
+            $fixed++
+            $wsChanged = $true
+        }
+        if ($wsChanged) { Save-PartXDocument -Part $wsPart -Document $wsDoc }
+    }
+
+    if ($fixed -gt 0) {
+        # Update count attributes on <fonts> / <cellXfs> if they exist.
+        $fontsCount = $fontsEl.Attribute([System.Xml.Linq.XName]::Get('count'))
+        if ($fontsCount) { $fontsCount.Value = "$($fontEls.Count)" }
+        $xfCount = $cellXfsEl.Attribute([System.Xml.Linq.XName]::Get('count'))
+        if ($xfCount) { $xfCount.Value = "$($xfEls.Count)" }
+        Save-PartXDocument -Part $stylesPart -Document $stylesDoc
+    }
+    return $fixed
+}
+
+function Save-PartXDocument {
+    param($Part, [System.Xml.Linq.XDocument] $Document)
+    $stream = $Part.GetStream([IO.FileMode]::Create, [IO.FileAccess]::Write)
+    try {
+        $Document.Save($stream)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+#--------------------------------------------------------------------
 # Main: open document and run all rules
 #--------------------------------------------------------------------
 
@@ -729,4 +1028,66 @@ else {
     Write-Output $summary
 }
 
-exit $exitCode
+#--------------------------------------------------------------------
+# Autofix
+#--------------------------------------------------------------------
+
+if (-not $Fix) { exit $exitCode }
+
+$fixableRuleNames = @('MissingTableHeaders', 'RedOnlyNegativeFormatting', 'LowContrast')
+$hasFixable = $false
+foreach ($i in $issues) {
+    if ($fixableRuleNames -contains $i.RuleName) { $hasFixable = $true; break }
+}
+if (-not $hasFixable) { exit $exitCode }
+
+$fixedPath = [IO.Path]::ChangeExtension($FilePath, $null).TrimEnd('.') + '.fixed' + $ext
+try {
+    Copy-Item -LiteralPath $FilePath -Destination $fixedPath -Force
+}
+catch {
+    [Console]::Error.WriteLine("Failed to create fixed copy at '$fixedPath': $($_.Exception.Message)")
+    exit 2
+}
+
+$fixCounts = @{ MissingTableHeaders = 0; RedOnlyNegativeFormatting = 0; LowContrast = 0 }
+$fixDoc = $null
+try {
+    try {
+        $fixDoc = [DocumentFormat.OpenXml.Packaging.SpreadsheetDocument]::Open($fixedPath, $true)
+    } catch {
+        [Console]::Error.WriteLine("Failed to open fixed copy '$fixedPath' for editing: $($_.Exception.Message)")
+        exit 2
+    }
+    $wbPartFix = $fixDoc.WorkbookPart
+    if ($null -ne $wbPartFix) {
+        foreach ($wsPart in $wbPartFix.WorksheetParts) {
+            foreach ($tdp in $wsPart.TableDefinitionParts) {
+                $fixCounts.MissingTableHeaders += (Repair-XlsxTableHeader -TableDefinitionPart $tdp)
+            }
+        }
+        $fixCounts.RedOnlyNegativeFormatting = Repair-XlsxRedOnlyNumberFormat `
+            -WorkbookStylesPart $wbPartFix.WorkbookStylesPart `
+            -UsedNumFmtIds (Get-UsedNumFmtId -WorkbookPart $wbPartFix)
+        $fixCounts.LowContrast = Repair-XlsxLowContrast -WorkbookPart $wbPartFix
+    }
+}
+finally {
+    if ($null -ne $fixDoc) {
+        try { $fixDoc.Dispose() } catch { Write-Verbose "Dispose failed: $($_.Exception.Message)" }
+    }
+}
+
+$fixSummaryParts = @()
+foreach ($k in $fixableRuleNames) {
+    if ($fixCounts[$k] -gt 0) { $fixSummaryParts += ('{0} ({1})' -f $k, $fixCounts[$k]) }
+}
+if ($fixSummaryParts.Count -eq 0) {
+    Remove-Item -LiteralPath $fixedPath -Force -ErrorAction SilentlyContinue
+    exit $exitCode
+}
+
+Write-Output ("FIXED {0}: {1}" -f $fixedPath, ($fixSummaryParts -join ', '))
+
+& $PSCommandPath -FilePath $fixedPath -Format $Format
+exit $LASTEXITCODE

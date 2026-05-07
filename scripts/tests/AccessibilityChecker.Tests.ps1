@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Pester suite for the Office accessibility checkers.
 
@@ -44,6 +44,30 @@ BeforeAll {
             ExitCode  = $exit
             Lines     = $lines
             RuleNames = @($rules)
+        }
+    }
+
+    function Invoke-Fix {
+        param(
+            [Parameter(Mandatory)] [string] $Path,
+            [string] $Format = 'detailed'
+        )
+        $stdout = & $script:CheckerPath -FilePath $Path -Format $Format -Fix 2>$null
+        $exit   = $LASTEXITCODE
+        $lines  = @($stdout | ForEach-Object { [string]$_ })
+        # Resolve the FIXED line — its target is the absolute path the checker
+        # wrote. Tests assert against that file rather than a derived guess.
+        $fixedLine = $lines | Where-Object { $_ -like 'FIXED *' } | Select-Object -First 1
+        $fixedPath = $null
+        if ($fixedLine) {
+            # "FIXED <abs path>: rule (n), rule (m)"
+            if ($fixedLine -match '^FIXED\s+(.+?):\s+') { $fixedPath = $Matches[1] }
+        }
+        [pscustomobject]@{
+            ExitCode  = $exit
+            Lines     = $lines
+            FixedLine = $fixedLine
+            FixedPath = $fixedPath
         }
     }
 
@@ -216,6 +240,102 @@ Describe 'Office accessibility checker' {
             $result.ExitCode | Should -Be 0
             $result.Pass     | Should -Be 1
             $result.Error    | Should -Be 0
+        }
+    }
+
+    Context 'Autofix' {
+        BeforeEach {
+            # Each test copies the relevant fixture into a per-test scratch dir
+            # so Invoke-Fix can write *.fixed.<ext> sibling without polluting
+            # the committed fixtures folder.
+            $script:FixDir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $script:FixDir | Out-Null
+        }
+
+        # Each row: source fixture, the rule we expect the fixer to clear from
+        # the post-fix run, and whether the fix should result in an exit-0
+        # (true) or exit-1 (false — there are remaining errors after the fix).
+        $cases = @(
+            @{ File = 'word-missing-table-headers.docx';       Rule = 'MissingTableHeaders';       Passes = $true  }
+            @{ File = 'word-repeated-blanks.docx';             Rule = 'RepeatedBlanks';            Passes = $true  }
+            @{ File = 'word-low-contrast.docx';                Rule = 'LowContrast';               Passes = $true  }
+            @{ File = 'excel-missing-table-headers.xlsx';      Rule = 'MissingTableHeaders';       Passes = $true  }
+            @{ File = 'excel-red-only-negative-formatting.xlsx'; Rule = 'RedOnlyNegativeFormatting'; Passes = $true }
+            @{ File = 'excel-low-contrast.xlsx';               Rule = 'LowContrast';               Passes = $true  }
+            @{ File = 'powerpoint-missing-table-headers.pptx'; Rule = 'MissingTableHeaders';       Passes = $true  }
+            @{ File = 'powerpoint-low-contrast.pptx';          Rule = 'LowContrast';               Passes = $true  }
+        )
+
+        It '<File>: -Fix produces a .fixed copy that no longer reports <Rule>' -ForEach $cases {
+            $src  = Join-Path $script:FixtureDir $File
+            $copy = Join-Path $script:FixDir $File
+            Copy-Item -LiteralPath $src -Destination $copy
+
+            $result = Invoke-Fix -Path $copy
+            $result.FixedLine | Should -Not -BeNullOrEmpty -Because (
+                "expected a FIXED line. Output was:`n" + ($result.Lines -join "`n")
+            )
+            $result.FixedLine | Should -Match $Rule -Because (
+                "FIXED line should mention the rule that was repaired"
+            )
+            $result.FixedPath | Should -Not -BeNullOrEmpty
+            Test-Path -LiteralPath $result.FixedPath | Should -BeTrue
+
+            # Re-check the fixed file directly: the rule must no longer fire.
+            $verify = Invoke-Checker -Path $result.FixedPath
+            $verify.RuleNames | Should -Not -Contain $Rule -Because (
+                "fix was supposed to eliminate $Rule. Post-fix output was:`n" +
+                ($verify.Lines -join "`n")
+            )
+
+            if ($Passes) {
+                $verify.ExitCode | Should -Be 0 -Because (
+                    "fixture only fails on $Rule, so the fixed file should pass"
+                )
+            }
+        }
+
+        It 'is a no-op on already-accessible files' {
+            $src  = Join-Path $script:FixtureDir 'word-accessible-baseline.docx'
+            $copy = Join-Path $script:FixDir 'word-accessible-baseline.docx'
+            Copy-Item -LiteralPath $src -Destination $copy
+
+            $result = Invoke-Fix -Path $copy
+            $result.ExitCode | Should -Be 0
+            $result.FixedLine | Should -BeNullOrEmpty
+            # No .fixed copy should be written when nothing was fixed.
+            (Test-Path -LiteralPath (Join-Path $script:FixDir 'word-accessible-baseline.fixed.docx')) | Should -BeFalse
+        }
+
+        It 'leaves the original file unmodified' {
+            $src  = Join-Path $script:FixtureDir 'word-missing-table-headers.docx'
+            $copy = Join-Path $script:FixDir 'word-missing-table-headers.docx'
+            Copy-Item -LiteralPath $src -Destination $copy
+            $beforeHash = (Get-FileHash -LiteralPath $copy).Hash
+
+            $result = Invoke-Fix -Path $copy
+            $result.FixedLine | Should -Not -BeNullOrEmpty
+
+            (Get-FileHash -LiteralPath $copy).Hash | Should -Be $beforeHash -Because (
+                "the input file must never be mutated by -Fix"
+            )
+        }
+
+        It 'bulk-scan with -Fix skips previously produced .fixed files' {
+            # First run: creates word-missing-table-headers.fixed.docx alongside the input.
+            Copy-Item -LiteralPath (Join-Path $script:FixtureDir 'word-missing-table-headers.docx') `
+                      -Destination $script:FixDir
+            Copy-Item -LiteralPath (Join-Path $script:FixtureDir 'word-accessible-baseline.docx') `
+                      -Destination $script:FixDir
+
+            & $script:CheckerPath -Path $script:FixDir -Fix 2>$null | Out-Null
+            $LASTEXITCODE | Should -BeIn @(0, 1)
+
+            # Second run on the same dir: should not pick up *.fixed.docx as an
+            # input (else we'd re-emit FIXED on it and create *.fixed.fixed.docx).
+            & $script:CheckerPath -Path $script:FixDir -Fix 2>$null | Out-Null
+            $fixedFixed = Join-Path $script:FixDir 'word-missing-table-headers.fixed.fixed.docx'
+            (Test-Path -LiteralPath $fixedFixed) | Should -BeFalse
         }
     }
 }
