@@ -101,15 +101,23 @@ scripts/
   check-docx-accessibility.ps1      # Word rules + fixes
   check-xlsx-accessibility.ps1      # Excel rules + fixes
   check-pptx-accessibility.ps1      # PowerPoint rules + fixes
+  Build-Module.ps1                  # assembles module/OfficeAccessibilityChecker for publish
   lint.ps1                          # PSScriptAnalyzer wrapper
   lib/                              # gitignored; populated by setup script
   tests/
     AccessibilityChecker.Tests.ps1  # manifest-driven Pester suite
+    Module.Tests.ps1                # PowerShell Gallery module smoke tests
     Build-Fixtures.ps1              # one-shot regenerator (run when rules change)
     Invoke-Tests.ps1                # local convenience wrapper
     fixtures/
       manifest.psd1                 # filename -> expected exit + rule names
       *.docx, *.xlsx, *.pptx        # committed; rebuild via Build-Fixtures.ps1
+module/
+  OfficeAccessibilityChecker/       # PowerShell Gallery package
+    OfficeAccessibilityChecker.psd1 # manifest
+    OfficeAccessibilityChecker.psm1 # loader
+    Public/                         # exported cmdlets
+    Private/                        # build artifact: gitignored, mirrors scripts/
 docs/
   RULES.md                          # this document
 .github/workflows/ci.yml            # lint (Windows) + Pester matrix on Windows/macOS/Linux

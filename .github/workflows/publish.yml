@@ -1,0 +1,54 @@
+name: Publish to PowerShell Gallery
+
+# Tag-triggered publish. Only refs of the form vX.Y.Z reach this workflow,
+# and the powershell-gallery environment further gates the secret to that
+# tag pattern via deployment branch/tag rules. workflow_dispatch is allowed
+# so a maintainer can re-run after a transient publish failure without
+# having to retag.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# The job only needs to read repo contents (for actions/checkout) and to
+# reach the PowerShell Gallery via PSGALLERY_API_KEY. Lock down GITHUB_TOKEN
+# accordingly so a compromised step can't push to the repo or open PRs.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    environment: powershell-gallery
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches manifest ModuleVersion
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $tagVersion = $tag -replace '^v', ''
+          $manifest = Import-PowerShellDataFile ./module/OfficeAccessibilityChecker/OfficeAccessibilityChecker.psd1
+          if ($manifest.ModuleVersion -ne $tagVersion) {
+              Write-Error "Tag '$tag' (version $tagVersion) does not match manifest ModuleVersion '$($manifest.ModuleVersion)'. Bump the manifest before tagging."
+              exit 1
+          }
+          Write-Host "Tag and manifest both at $tagVersion."
+
+      - name: Assemble module
+        shell: pwsh
+        run: ./scripts/Build-Module.ps1
+
+      - name: Publish to PowerShell Gallery
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          if (-not $env:PSGALLERY_API_KEY) {
+              Write-Error "PSGALLERY_API_KEY secret is not set on the 'powershell-gallery' environment."
+              exit 1
+          }
+          Publish-Module -Path ./module/OfficeAccessibilityChecker -NuGetApiKey $env:PSGALLERY_API_KEY -Verbose
