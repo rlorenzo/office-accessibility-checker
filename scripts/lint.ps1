@@ -27,14 +27,22 @@ if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
     exit 2
 }
 
-$settingsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'PSScriptAnalyzerSettings.psd1'
-$scriptsPath  = $PSScriptRoot
+$repoRoot     = Split-Path -Parent $PSScriptRoot
+$settingsPath = Join-Path $repoRoot 'PSScriptAnalyzerSettings.psd1'
 
-$results = Invoke-ScriptAnalyzer `
-    -Path $scriptsPath `
-    -Recurse `
-    -Settings $settingsPath `
-    -Severity $MinSeverity
+# Scan both the canonical scripts and the module's hand-written surface
+# (Public/, .psm1, .psd1). The module's Private/ folder is a build artifact
+# mirroring scripts/, so it's deliberately excluded to avoid double-flagging.
+$scanPaths = @(
+    $PSScriptRoot
+    Join-Path $repoRoot 'module' 'OfficeAccessibilityChecker' 'Public'
+    Join-Path $repoRoot 'module' 'OfficeAccessibilityChecker' 'OfficeAccessibilityChecker.psm1'
+    Join-Path $repoRoot 'module' 'OfficeAccessibilityChecker' 'OfficeAccessibilityChecker.psd1'
+) | Where-Object { Test-Path -LiteralPath $_ }
+
+$results = foreach ($p in $scanPaths) {
+    Invoke-ScriptAnalyzer -Path $p -Recurse -Settings $settingsPath -Severity $MinSeverity
+}
 
 if ($results) {
     $results | Format-Table -AutoSize Severity, RuleName, Line, ScriptName, Message | Out-String | Write-Information

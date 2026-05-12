@@ -1,6 +1,7 @@
 # office-accessibility-checker
 
 [![CI](https://github.com/rlorenzo/office-accessibility-checker/actions/workflows/ci.yml/badge.svg)](https://github.com/rlorenzo/office-accessibility-checker/actions/workflows/ci.yml)
+[![PowerShell Gallery](https://img.shields.io/powershellgallery/v/OfficeAccessibilityChecker?logo=powershell&label=PSGallery)](https://www.powershellgallery.com/packages/OfficeAccessibilityChecker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/rlorenzo?label=Sponsor&logo=GitHub)](https://github.com/sponsors/rlorenzo)
 [![PowerShell 7+](https://img.shields.io/badge/PowerShell-7%2B-blue?logo=powershell)](https://learn.microsoft.com/en-us/powershell/)
@@ -12,15 +13,27 @@ A command-line tool that checks Word, Excel, and PowerPoint files for accessibil
 
 PowerShell 7 or newer. Microsoft maintains [install instructions for Windows, macOS, and Linux](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell). Once `pwsh` is on your path, you're set.
 
-## Quick start
+## Install
+
+**Via PowerShell Gallery** (recommended):
 
 ```powershell
-./scripts/setup-accessibility-checker.ps1
-./scripts/check-office-accessibility.ps1 path/to/file.docx
+Install-Module OfficeAccessibilityChecker
+Initialize-OfficeAccessibilityChecker        # one-time SDK download
+Test-OfficeAccessibility path/to/file.docx
 # PASS path/to/file.docx
 ```
 
-The setup step is a one-time download. After that, run the checker on any `.docx`, `.xlsx`, `.pptx` file (macro-enabled `.docm`/`.xlsm`/`.pptm` work too).
+**Or, from a clone:**
+
+```powershell
+git clone https://github.com/rlorenzo/office-accessibility-checker.git
+cd office-accessibility-checker
+./scripts/setup-accessibility-checker.ps1
+./scripts/check-office-accessibility.ps1 path/to/file.docx
+```
+
+The rest of this README uses the script form (`./scripts/check-office-accessibility.ps1`). Module users can substitute `Test-OfficeAccessibility` — the parameters are identical.
 
 ## Checking a file
 
