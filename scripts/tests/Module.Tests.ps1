@@ -10,23 +10,24 @@
 
 BeforeAll {
     $script:RepoRoot   = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $script:ModuleDir  = Join-Path $script:RepoRoot 'module' 'OfficeAccessibilityChecker'
+    $script:ModuleDir  = Join-Path (Join-Path $script:RepoRoot 'module') 'OfficeAccessibilityChecker'
     $script:ManifestPath = Join-Path $script:ModuleDir 'OfficeAccessibilityChecker.psd1'
     $script:FixtureDir = Join-Path $PSScriptRoot 'fixtures'
 
     # Build the module so Private/ is populated. Build-Module.ps1 also runs
     # Test-ModuleManifest, so a malformed manifest fails here loudly.
-    & (Join-Path $script:RepoRoot 'scripts' 'Build-Module.ps1') | Out-Null
+    & (Join-Path (Join-Path $script:RepoRoot 'scripts') 'Build-Module.ps1') | Out-Null
 
     # Make sure the SDK is available inside the module (Initialize would
     # download it on first use; we skip that since the repo's scripts/lib
     # already has it from the main test setup, and we want this suite to be
     # cheap and offline-friendly).
-    $repoSdk     = Join-Path $script:RepoRoot 'scripts' 'lib' 'DocumentFormat.OpenXml.dll'
-    $moduleLib   = Join-Path $script:ModuleDir 'Private' 'lib'
+    $repoLib     = Join-Path (Join-Path $script:RepoRoot 'scripts') 'lib'
+    $repoSdk     = Join-Path $repoLib 'DocumentFormat.OpenXml.dll'
+    $moduleLib   = Join-Path (Join-Path $script:ModuleDir 'Private') 'lib'
     if ((Test-Path -LiteralPath $repoSdk) -and -not (Test-Path -LiteralPath (Join-Path $moduleLib 'DocumentFormat.OpenXml.dll'))) {
         if (-not (Test-Path -LiteralPath $moduleLib)) { New-Item -ItemType Directory -Path $moduleLib | Out-Null }
-        Copy-Item -Path (Join-Path $script:RepoRoot 'scripts' 'lib' '*.dll') -Destination $moduleLib -Force
+        Copy-Item -Path (Join-Path $repoLib '*.dll') -Destination $moduleLib -Force
     }
 
     Import-Module -Name $script:ManifestPath -Force

@@ -50,7 +50,7 @@
         [switch] $Fix
     )
 
-    $dispatcher = Join-Path $PSScriptRoot '..' 'Private' 'check-office-accessibility.ps1'
+    $dispatcher = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'Private') 'check-office-accessibility.ps1'
     if (-not (Test-Path -LiteralPath $dispatcher)) {
         throw "OfficeAccessibilityChecker is missing its bundled scripts at '$dispatcher'. Reinstall the module."
     }

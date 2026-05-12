@@ -28,7 +28,7 @@ $InformationPreference = 'Continue'
 
 $repoRoot   = Split-Path -Parent $PSScriptRoot
 $scriptsDir = Join-Path $repoRoot 'scripts'
-$moduleDir  = Join-Path $repoRoot 'module' 'OfficeAccessibilityChecker'
+$moduleDir  = Join-Path (Join-Path $repoRoot 'module') 'OfficeAccessibilityChecker'
 $privateDir = Join-Path $moduleDir 'Private'
 
 if (-not (Test-Path -LiteralPath $moduleDir)) {

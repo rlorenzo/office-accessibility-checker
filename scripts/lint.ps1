@@ -33,11 +33,12 @@ $settingsPath = Join-Path $repoRoot 'PSScriptAnalyzerSettings.psd1'
 # Scan both the canonical scripts and the module's hand-written surface
 # (Public/, .psm1, .psd1). The module's Private/ folder is a build artifact
 # mirroring scripts/, so it's deliberately excluded to avoid double-flagging.
+$moduleRoot = Join-Path (Join-Path $repoRoot 'module') 'OfficeAccessibilityChecker'
 $scanPaths = @(
     $PSScriptRoot
-    Join-Path $repoRoot 'module' 'OfficeAccessibilityChecker' 'Public'
-    Join-Path $repoRoot 'module' 'OfficeAccessibilityChecker' 'OfficeAccessibilityChecker.psm1'
-    Join-Path $repoRoot 'module' 'OfficeAccessibilityChecker' 'OfficeAccessibilityChecker.psd1'
+    Join-Path $moduleRoot 'Public'
+    Join-Path $moduleRoot 'OfficeAccessibilityChecker.psm1'
+    Join-Path $moduleRoot 'OfficeAccessibilityChecker.psd1'
 ) | Where-Object { Test-Path -LiteralPath $_ }
 
 $results = foreach ($p in $scanPaths) {

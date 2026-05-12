@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Run on direct pushes to main (e.g. merge commits) so the protected
+  # branch always has a green status. For everything else, pull_request
+  # is the trigger — pushes to a PR branch would otherwise fire both
+  # events and run CI twice in parallel.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
     branches: ['**']
 
@@ -30,8 +34,13 @@ jobs:
         shell: pwsh
         run: ./scripts/lint.ps1
 
+  # PowerShell 7 (cross-platform surface) on all three OSes. Kept as a
+  # single matrix-driven job because every step shares the same `shell: pwsh`.
+  # The PS 5.1 runtime needs `shell: powershell`, but GitHub Actions does not
+  # allow expressions in step-level `shell:` fields, so that edition lives in
+  # a separate job below rather than as a matrix row here.
   test:
-    name: Pester (${{ matrix.os }})
+    name: Pester (pwsh-${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -67,5 +76,51 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pester-results-${{ matrix.os }}
+          name: pester-results-pwsh-${{ matrix.os }}
+          path: testResults.xml
+
+  # Windows PowerShell 5.1 on .NET Framework — the legacy floor. PSGallery
+  # installs target this edition by default on Windows, so we test the same
+  # runtime users get from Install-Module. Separate job (not a matrix row of
+  # `test`) because `shell:` cannot be a matrix expression.
+  test-ps51:
+    name: Pester (ps51-windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Open XML SDK
+        shell: powershell
+        run: ./scripts/setup-accessibility-checker.ps1
+
+      # Windows PowerShell 5.1 defaults to TLS 1.0/1.1 and ships an older
+      # PowerShellGet/NuGet provider that PSGallery rejects. Force TLS 1.2 and
+      # bootstrap the NuGet provider before Install-Module.
+      - name: Ensure Pester 5+ is available
+        shell: powershell
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+
+      - name: Run Pester suite
+        shell: powershell
+        run: |
+          # 5.1 ships with Pester 3.x baked into the OS; without an explicit
+          # import, Invoke-Pester resolves to that older module and the
+          # Pester 5 config API blows up.
+          Import-Module Pester -MinimumVersion 5.5.0 -Force
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'scripts/tests'
+          $config.Run.Exit = $true
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = 'testResults.xml'
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+      - name: Upload Pester results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results-ps51-windows
           path: testResults.xml
