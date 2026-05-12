@@ -22,7 +22,7 @@
         [switch] $Force
     )
 
-    $setup = Join-Path $PSScriptRoot '..' 'Private' 'setup-accessibility-checker.ps1'
+    $setup = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'Private') 'setup-accessibility-checker.ps1'
     if (-not (Test-Path -LiteralPath $setup)) {
         throw "OfficeAccessibilityChecker is missing its bundled setup script at '$setup'. Reinstall the module."
     }

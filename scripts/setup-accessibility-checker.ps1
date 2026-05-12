@@ -58,14 +58,36 @@ New-Item -ItemType Directory -Path $tempDir | Out-Null
 
 # Pick a target framework folder compatible with the host runtime.
 #
-# Windows PowerShell 5.1 runs on .NET Framework 4.x and cannot load net5.0+
-# assemblies, so a naive "highest net*" preference produces a setup that looks
-# successful but breaks every Add-Type call at checker invocation time. We pin
-# to netstandard2.0/2.1 (loadable by both PS 5.1 and modern .NET) unless the
-# package only ships net*/lib targets. When we do fall back to a net* folder,
-# we filter to majors compatible with the running .NET runtime.
+# Windows PowerShell 5.1 (PSEdition 'Desktop') runs on .NET Framework 4.x.
+# When a package ships a net4x folder, prefer it over netstandard2.0: the
+# net4x build is self-contained, whereas netstandard2.0 on .NET Framework
+# pulls in NuGet shims (e.g. System.IO.Packaging) that we'd otherwise have
+# to bundle. Modern pwsh (PSEdition 'Core') prefers netstandard2.0 because
+# the .NET runtime resolves those shims natively.
+#
+# Either edition can also load net5+ folders when the host runtime version
+# matches, so we keep a host-major fallback for packages that ship only
+# modern targets.
 function Select-BestFramework {
     param([string[]] $FrameworkNames)
+
+    $isDesktop = $PSVersionTable.PSEdition -eq 'Desktop'
+
+    # On Windows PowerShell 5.1, a net4x build is the cleanest match — no
+    # transitive deps, no shim assemblies. Pick the highest net4* available.
+    if ($isDesktop) {
+        $net4 = foreach ($n in $FrameworkNames) {
+            if ($n -match '^net4(\d+)$') { [pscustomobject]@{ Name = $n; Sub = [int]$Matches[1] } }
+        }
+        if ($net4) {
+            return ($net4 | Sort-Object -Property Sub -Descending | Select-Object -First 1).Name
+        }
+        # net46 is conventionally written 'net46' (no minor), handle that too.
+        if ($FrameworkNames -contains 'net46') { return 'net46' }
+        if ($FrameworkNames -contains 'net45') { return 'net45' }
+        if ($FrameworkNames -contains 'net40') { return 'net40' }
+        if ($FrameworkNames -contains 'net35') { return 'net35' }
+    }
 
     if ($FrameworkNames -contains 'netstandard2.0') { return 'netstandard2.0' }
     if ($FrameworkNames -contains 'netstandard2.1') { return 'netstandard2.1' }
@@ -75,9 +97,7 @@ function Select-BestFramework {
     if ($netstandard) { return $netstandard | Select-Object -First 1 }
 
     # Only net*/lib targets remain. Pick the highest major <= the host runtime.
-    # PSEdition 'Desktop' = Windows PowerShell on .NET Framework 4.x (no net5+).
-    $hostMajor = if ($PSVersionTable.PSEdition -eq 'Desktop') { 4 }
-                 else { [Environment]::Version.Major }
+    $hostMajor = if ($isDesktop) { 4 } else { [Environment]::Version.Major }
 
     $compatible = foreach ($n in $FrameworkNames) {
         if ($n -match '^net(\d+)(?:\.(\d+))?') {
@@ -124,7 +144,12 @@ try {
         }
 
         Write-Information "Extracting $name..."
-        Expand-Archive -Path $nupkg -DestinationPath $extract -Force
+        # Windows PowerShell 5.1's Expand-Archive rejects any file whose
+        # extension is not literally .zip — a .nupkg is just a zip, so we
+        # rename in place first. pwsh 7+ is permissive but accepts this too.
+        $zip = [IO.Path]::ChangeExtension($nupkg, '.zip')
+        Move-Item -LiteralPath $nupkg -Destination $zip
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
 
         $libRoot = Join-Path $extract 'lib'
         if (-not (Test-Path $libRoot)) {

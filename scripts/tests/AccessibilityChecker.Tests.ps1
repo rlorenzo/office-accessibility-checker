@@ -10,20 +10,21 @@
 #>
 
 BeforeDiscovery {
-    $manifestPath = Join-Path $PSScriptRoot 'fixtures' 'manifest.psd1'
+    $manifestPath = Join-Path (Join-Path $PSScriptRoot 'fixtures') 'manifest.psd1'
     $script:Fixtures = (Import-PowerShellDataFile -LiteralPath $manifestPath).Fixtures
 }
 
 BeforeAll {
-    $script:CheckerPath = Join-Path $PSScriptRoot '..' 'check-office-accessibility.ps1'
+    $scriptsDir = Split-Path -Parent $PSScriptRoot
+    $script:CheckerPath = Join-Path $scriptsDir 'check-office-accessibility.ps1'
     $script:FixtureDir  = Join-Path $PSScriptRoot 'fixtures'
 
     # Make sure the SDK is present locally so the checker can load it. CI runs
     # setup-accessibility-checker.ps1 in a separate step, but a developer who
     # invokes the suite directly may not have done so yet.
-    $sdkPath = Join-Path $PSScriptRoot '..' 'lib' 'DocumentFormat.OpenXml.dll'
+    $sdkPath = Join-Path (Join-Path $scriptsDir 'lib') 'DocumentFormat.OpenXml.dll'
     if (-not (Test-Path -LiteralPath $sdkPath)) {
-        & (Join-Path $PSScriptRoot '..' 'setup-accessibility-checker.ps1')
+        & (Join-Path $scriptsDir 'setup-accessibility-checker.ps1')
     }
 
     function Invoke-Checker {
