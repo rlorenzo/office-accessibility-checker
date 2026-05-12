@@ -4,14 +4,14 @@
 [![PowerShell Gallery](https://img.shields.io/powershellgallery/v/OfficeAccessibilityChecker?logo=powershell&label=PSGallery)](https://www.powershellgallery.com/packages/OfficeAccessibilityChecker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/rlorenzo?label=Sponsor&logo=GitHub)](https://github.com/sponsors/rlorenzo)
-[![PowerShell 7+](https://img.shields.io/badge/PowerShell-7%2B-blue?logo=powershell)](https://learn.microsoft.com/en-us/powershell/)
+[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-blue?logo=powershell)](https://learn.microsoft.com/en-us/powershell/)
 ![Cross-platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 
 A command-line tool that checks Word, Excel, and PowerPoint files for accessibility problems — the same kinds of issues Microsoft's built-in Accessibility Checker reports. No copy of Office required. Runs on Windows, macOS, and Linux.
 
 ## Requirements
 
-PowerShell 7 or newer. Microsoft maintains [install instructions for Windows, macOS, and Linux](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell). Once `pwsh` is on your path, you're set.
+Windows PowerShell 5.1 or PowerShell 7+. Windows 10/11 ships 5.1 preinstalled, so nothing to install there. On macOS and Linux, install PowerShell 7 — Microsoft maintains [install instructions](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell).
 
 ## Install
 
