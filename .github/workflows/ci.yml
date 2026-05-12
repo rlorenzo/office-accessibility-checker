@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: ['**']
 
+# CI only reads the repo — no comments, no commits, no releases. Lock
+# GITHUB_TOKEN to contents: read so a compromised step cannot push to
+# the repo or open PRs.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: PSScriptAnalyzer
