@@ -51,3 +51,38 @@ Both run in CI on every push and pull request via [.github/workflows/ci.yml](.gi
 - Commit messages in the imperative mood ("Add MissingAltText fixture", not "Added").
 - Reference issue numbers in the PR description when relevant.
 - Keep PRs focused: rule changes that ship without updated fixtures and manifest entries will not pass CI.
+
+## Releasing to PowerShell Gallery
+
+The published module lives under [module/OfficeAccessibilityChecker/](module/OfficeAccessibilityChecker/). The hand-written surface (`.psd1` manifest, `.psm1` loader, `Public/`) is committed; the `Private/` folder is a build artifact mirrored from `scripts/` and is gitignored.
+
+Publishing is automated by [.github/workflows/publish.yml](.github/workflows/publish.yml): pushing a `v*` tag triggers a job that re-assembles the module and uploads it to the Gallery. The standard release flow:
+
+1. **Bump `ModuleVersion`** in [OfficeAccessibilityChecker.psd1](module/OfficeAccessibilityChecker/OfficeAccessibilityChecker.psd1). Open a PR, merge after CI is green.
+2. **Tag the merge commit on `main`** with the matching version:
+   ```powershell
+   git checkout main && git pull
+   git tag v1.x.x && git push origin v1.x.x
+   ```
+3. The `Publish to PowerShell Gallery` workflow runs, verifies that the tag matches the manifest, and runs `Publish-Module`. Watch the run under the **Actions** tab.
+
+The workflow fails fast if the tag and `ModuleVersion` disagree — that's the guard against "tagged v1.1.0 but forgot to bump the manifest."
+
+### Manual fallback
+
+If the workflow is broken or you need to push without a tag, the same flow runs locally:
+
+```powershell
+./scripts/Build-Module.ps1
+Import-Module ./module/OfficeAccessibilityChecker -Force
+Test-OfficeAccessibility ./scripts/tests/fixtures/word-accessible-baseline.docx
+Publish-Module -Path ./module/OfficeAccessibilityChecker -NuGetApiKey $env:PSGALLERY_API_KEY
+```
+
+### Required GitHub configuration
+
+A one-time setup, already done for this repo but documented for forks:
+
+- Create a GitHub environment named `powershell-gallery` (**Settings → Environments**).
+- Add a **Deployment branches and tags** rule restricted to tags matching `v*`. This means only a `v*` tag push can access the secret.
+- Add a repository-scoped or environment-scoped `PSGALLERY_API_KEY` secret with a Gallery API key that has push rights to `OfficeAccessibilityChecker`.
